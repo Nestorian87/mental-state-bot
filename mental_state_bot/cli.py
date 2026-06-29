@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,16 +31,30 @@ def migrate() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     env = {"DATABASE_SYNC_URL": settings.database_sync_url}
+    config_path = _alembic_config_path()
     try:
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
-            cwd=Path(__file__).resolve().parent.parent,
-            env={**__import__("os").environ, **env},
+            [sys.executable, "-m", "alembic", "-c", str(config_path), "upgrade", "head"],
+            cwd=config_path.parent,
+            env={**os.environ, **env},
             check=True,
         )
     except subprocess.CalledProcessError as exc:
         typer.echo("Database migration failed. See Alembic/PostgreSQL output above.", err=True)
         raise typer.Exit(exc.returncode) from exc
+
+
+def _alembic_config_path() -> Path:
+    candidates = [
+        Path.cwd() / "alembic.ini",
+        Path("/app/alembic.ini"),
+        Path(__file__).resolve().parent.parent / "alembic.ini",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    typer.echo("Could not find alembic.ini. Run from the project directory or include it in the image.", err=True)
+    raise typer.Exit(1)
 
 
 @app.command()

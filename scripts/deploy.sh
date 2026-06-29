@@ -57,7 +57,5 @@ export BOT_IMAGE
 echo "Deploying $BOT_IMAGE"
 
 docker compose -f "$COMPOSE_FILE" pull
-docker compose -f "$COMPOSE_FILE" up -d
-docker compose -f "$COMPOSE_FILE" exec -T bot mental-state-bot migrate
-docker compose -f "$COMPOSE_FILE" restart bot
+docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 docker compose -f "$COMPOSE_FILE" ps
