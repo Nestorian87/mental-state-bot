@@ -42,7 +42,7 @@ class User(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     username: Mapped[str | None] = mapped_column(String(255))
     first_name: Mapped[str | None] = mapped_column(String(255))
-    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Europe/Kiev")
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Europe/Kyiv")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     first_seen_at: Mapped[datetime] = created_at_col()
     last_seen_at: Mapped[datetime] = created_at_col()

@@ -32,7 +32,7 @@ def test_format_entry_line_includes_labels_and_quality() -> None:
     entry_id = "123"
     entry = SimpleNamespace(
         id=entry_id,
-        local_timestamp=datetime(2026, 6, 29, 10, 30, tzinfo=ZoneInfo("Europe/Kiev")),
+        local_timestamp=datetime(2026, 6, 29, 10, 30, tzinfo=ZoneInfo("Europe/Kyiv")),
         created_at=None,
         raw_text="лежу і не можу почати",
     )
@@ -85,7 +85,7 @@ def test_format_counts_sorts_by_count_then_name() -> None:
 
 
 def test_format_photo_moments_view_separates_photos_from_analysis() -> None:
-    tz = ZoneInfo("Europe/Kiev")
+    tz = ZoneInfo("Europe/Kyiv")
     moment = PhotoMoment(
         media=SimpleNamespace(created_at=datetime(2026, 6, 29, 14, 5, tzinfo=tz)),
         entry=SimpleNamespace(
@@ -103,7 +103,7 @@ def test_format_photo_moments_view_separates_photos_from_analysis() -> None:
 
 
 def test_format_gap_report_shows_notable_pauses_and_missed_prompts() -> None:
-    tz = ZoneInfo("Europe/Kiev")
+    tz = ZoneInfo("Europe/Kyiv")
     missed = SimpleNamespace(
         missed_at=datetime(2026, 6, 29, 12, 0, tzinfo=tz),
         status="open",
@@ -127,7 +127,7 @@ def test_format_gap_report_shows_notable_pauses_and_missed_prompts() -> None:
 
 
 def test_format_gap_report_includes_missed_prompt_reason() -> None:
-    tz = ZoneInfo("Europe/Kiev")
+    tz = ZoneInfo("Europe/Kyiv")
     missed = SimpleNamespace(
         missed_at=datetime(2026, 6, 29, 12, 0, tzinfo=tz),
         status="explained",

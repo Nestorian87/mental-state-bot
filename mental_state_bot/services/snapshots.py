@@ -3,7 +3,6 @@ from __future__ import annotations
 import random
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +17,7 @@ from mental_state_bot.services.preferences import (
     snapshots_paused,
     user_profile_context,
 )
-from mental_state_bot.time_utils import local_date, parse_hhmm, utc_now
+from mental_state_bot.time_utils import local_date, parse_hhmm, utc_now, zoneinfo
 
 
 async def maybe_send_scheduled_snapshot(
@@ -226,7 +225,7 @@ async def _handle_open_snapshot(
 def _is_active_time(now_utc: datetime, timezone: str, user_settings: UserSettings) -> bool:
     if snapshots_paused(user_settings):
         return False
-    local = now_utc.astimezone(ZoneInfo(timezone))
+    local = now_utc.astimezone(zoneinfo(timezone))
     start = parse_hhmm(user_settings.active_start)
     end = parse_hhmm(user_settings.active_end)
     current = local.time()

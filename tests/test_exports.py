@@ -39,7 +39,7 @@ def test_build_archive_payload_contains_full_sections() -> None:
         chat_id=456,
         username="me",
         first_name="Me",
-        timezone="Europe/Kiev",
+        timezone="Europe/Kyiv",
         first_seen_at=now,
         last_seen_at=now,
         is_active=True,
@@ -130,7 +130,7 @@ def test_render_archive_markdown_contains_days_entries_and_usage() -> None:
     payload = {
         "schema_version": EXPORT_SCHEMA_VERSION,
         "exported_at": "2026-06-29T12:00:00+00:00",
-        "user": {"telegram_user_id": 123, "timezone": "Europe/Kiev"},
+        "user": {"telegram_user_id": 123, "timezone": "Europe/Kyiv"},
         "days": [{"local_date": "2026-06-29"}],
         "entries": [
             {
@@ -273,7 +273,7 @@ def test_write_archive_bundle_includes_data_and_available_media(tmp_path: Path) 
     payload = {
         "schema_version": EXPORT_SCHEMA_VERSION,
         "exported_at": "2026-06-29T12:00:00+00:00",
-        "user": {"telegram_user_id": 123, "timezone": "Europe/Kiev"},
+        "user": {"telegram_user_id": 123, "timezone": "Europe/Kyiv"},
         "days": [],
         "entries": [],
         "media": [

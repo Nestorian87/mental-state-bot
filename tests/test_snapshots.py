@@ -11,14 +11,14 @@ def test_active_time_same_day_window() -> None:
     settings = SimpleNamespace(active_start="09:00", active_end="23:00")
     now = datetime(2026, 6, 29, 12, 0, tzinfo=ZoneInfo("UTC"))
 
-    assert _is_active_time(now, "Europe/Kiev", settings)
+    assert _is_active_time(now, "Europe/Kyiv", settings)
 
 
 def test_active_time_overnight_window() -> None:
     settings = SimpleNamespace(active_start="22:00", active_end="03:00")
     now = datetime(2026, 6, 29, 23, 30, tzinfo=ZoneInfo("UTC"))
 
-    assert _is_active_time(now, "Europe/Kiev", settings)
+    assert _is_active_time(now, "Europe/Kyiv", settings)
 
 
 def test_active_time_false_when_snapshots_paused() -> None:
@@ -29,7 +29,7 @@ def test_active_time_false_when_snapshots_paused() -> None:
     )
     now = datetime(2026, 6, 29, 12, 0, tzinfo=ZoneInfo("UTC"))
 
-    assert not _is_active_time(now, "Europe/Kiev", settings)
+    assert not _is_active_time(now, "Europe/Kyiv", settings)
 
 
 def test_snapshot_question_context_includes_photo_and_body_preferences() -> None:

@@ -4,12 +4,16 @@ from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 
+def zoneinfo(timezone: str) -> ZoneInfo:
+    return ZoneInfo(timezone)
+
+
 def utc_now() -> datetime:
-    return datetime.now(tz=ZoneInfo("UTC"))
+    return datetime.now(tz=zoneinfo("UTC"))
 
 
 def local_now(timezone: str) -> datetime:
-    return utc_now().astimezone(ZoneInfo(timezone))
+    return utc_now().astimezone(zoneinfo(timezone))
 
 
 def local_date(timezone: str) -> date:

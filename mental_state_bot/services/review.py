@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +20,7 @@ from mental_state_bot.db.models import (
     User,
     UserSettings,
 )
-from mental_state_bot.time_utils import local_date, parse_hhmm, utc_now
+from mental_state_bot.time_utils import local_date, parse_hhmm, utc_now, zoneinfo
 
 
 @dataclass(frozen=True)
@@ -66,7 +65,8 @@ async def format_today_view(session: AsyncSession, *, user: User, limit: int = 1
         lines.append(_format_entry_line(entry, quality_by_entry, labels_by_entry))
 
     if day.ended_at:
-        lines.extend(["", f"День закрито: {day.ended_at.astimezone().strftime('%H:%M')}"])
+        ended_at = day.ended_at.astimezone(zoneinfo(user.timezone))
+        lines.extend(["", f"День закрито: {ended_at.strftime('%H:%M')}"])
     return "\n".join(lines)
 
 
@@ -208,7 +208,7 @@ async def format_gaps_view(session: AsyncSession, *, user: User) -> str:
     day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=today)
     user_settings = await repo.get_user_settings(session, user.id)
     window_start, window_end = _active_window(today, user.timezone, user_settings)
-    now_local = utc_now().astimezone(ZoneInfo(user.timezone))
+    now_local = utc_now().astimezone(zoneinfo(user.timezone))
     coverage_end = min(now_local, window_end)
 
     entries = list(await repo.list_day_entries(session, day_id=day.id)) if day else []
@@ -660,7 +660,7 @@ def _display_date(value: object) -> str:
 
 
 def _active_window(day: date, timezone: str, settings: UserSettings) -> tuple[datetime, datetime]:
-    tz = ZoneInfo(timezone)
+    tz = zoneinfo(timezone)
     start_time = parse_hhmm(settings.active_start)
     end_time = parse_hhmm(settings.active_end)
     start = datetime.combine(day, start_time, tzinfo=tz)

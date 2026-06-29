@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +14,7 @@ from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, EmbeddingRecord, Entry, Summary, User
 from mental_state_bot.services.preferences import custom_interaction_style, user_profile_context
-from mental_state_bot.time_utils import local_date, utc_now
+from mental_state_bot.time_utils import local_date, local_now, utc_now, zoneinfo
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ class SummaryService:
             raw_text="лягаю спати",
             telegram_message_id=None,
             reply_to_message_id=None,
-            local_timestamp=datetime.now(tz=ZoneInfo(user.timezone)),
+            local_timestamp=local_now(user.timezone),
             meta={"boundary_kind": "sleep_marker"},
         )
         return await self.generate_day_summary(session, user=user, day=day, close_day=True)
@@ -419,7 +418,7 @@ class SummaryService:
 
 
 def _day_period_bounds(day: Day, timezone: str) -> tuple[datetime, datetime]:
-    tz = ZoneInfo(timezone)
+    tz = zoneinfo(timezone)
     start = datetime.combine(day.local_date, time.min, tzinfo=tz)
     end = datetime.combine(day.local_date, time.max, tzinfo=tz)
     return start, end
@@ -447,13 +446,13 @@ async def _close_day_in_session(
 
 
 def auto_morning_boundary_end(local_date_value: date, timezone: str) -> datetime:
-    tz = ZoneInfo(timezone)
+    tz = zoneinfo(timezone)
     next_midnight = datetime.combine(local_date_value + timedelta(days=1), time.min, tzinfo=tz)
-    return next_midnight.astimezone(ZoneInfo("UTC"))
+    return next_midnight.astimezone(zoneinfo("UTC"))
 
 
 def _date_period_bounds(start_date: date, end_date: date, timezone: str) -> tuple[datetime, datetime]:
-    tz = ZoneInfo(timezone)
+    tz = zoneinfo(timezone)
     start = datetime.combine(start_date, time.min, tzinfo=tz)
     end = datetime.combine(end_date, time.max, tzinfo=tz)
     return start, end

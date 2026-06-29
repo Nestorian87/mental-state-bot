@@ -1133,7 +1133,10 @@ async def snapshot_callback_handler(
     await callback.answer()
     await _clear_inline_keyboard(callback)
     for reply in replies:
-        await callback.message.answer(reply.text, reply_markup=main_reply_keyboard())
+        await callback.message.answer(
+            reply.text,
+            reply_markup=_inline_reply_keyboard(reply.keyboard) or main_reply_keyboard(),
+        )
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
 

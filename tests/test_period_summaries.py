@@ -47,7 +47,7 @@ def test_previous_month_dates_cross_year() -> None:
 
 
 def test_auto_morning_boundary_end_uses_next_local_midnight() -> None:
-    ended_at = auto_morning_boundary_end(date(2026, 6, 28), "Europe/Kiev")
+    ended_at = auto_morning_boundary_end(date(2026, 6, 28), "Europe/Kyiv")
 
     assert ended_at == datetime(2026, 6, 28, 21, 0, tzinfo=UTC)
 
@@ -67,7 +67,7 @@ async def test_yesterday_summary_auto_closes_uncertain_day(monkeypatch) -> None:
         boundary_kind="calendar",
         data_quality=None,
     )
-    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kiev")
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
     close_calls = []
 
     async def get_day_by_date(session, *, user_id, local_date_value):

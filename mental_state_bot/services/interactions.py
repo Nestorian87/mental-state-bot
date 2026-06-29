@@ -30,15 +30,6 @@ class InteractionResult:
     should_embed_entry: bool = False
 
 
-STOP_PHRASES = (
-    "не хочу",
-    "досить",
-    "не зараз",
-    "записати як є",
-    "пізніше",
-    "потім",
-)
-
 class InteractionService:
     def __init__(self, settings: Settings, ai_service: AIService) -> None:
         self.settings = settings
@@ -58,7 +49,6 @@ class InteractionService:
         user_settings = await repo.get_user_settings(session, user.id)
         style_context = _style_context(user_settings)
         open_snapshot = await repo.get_open_snapshot(session, user_id=user.id)
-        wants_stop = _contains_stop_phrase(text)
 
         if open_snapshot is None:
             entry = await self._save_and_analyze_entry(
@@ -85,27 +75,6 @@ class InteractionService:
             )
 
         await repo.mark_snapshot_in_progress(session, snapshot_id=open_snapshot.id)
-        if wants_stop:
-            entry = await repo.add_entry(
-                session,
-                user_id=user.id,
-                day_id=day.id,
-                snapshot_id=open_snapshot.id,
-                source="user_stop",
-                raw_text=text,
-                telegram_message_id=telegram_message_id,
-                reply_to_message_id=reply_to_message_id,
-                local_timestamp=local_now(user.timezone),
-                meta={"stop_phrase": True},
-            )
-            await repo.close_snapshot(session, snapshot_id=open_snapshot.id, status="closed_by_user")
-            return InteractionResult(
-                replies=[BotReply("Я почув, що зараз краще зупинитися. Записав як є, на цьому все.")],
-                entry_id=entry.id,
-                snapshot_closed=True,
-                should_embed_entry=True,
-            )
-
         entry = await self._save_and_analyze_entry(
             session,
             user=user,
@@ -207,7 +176,7 @@ class InteractionService:
             "later": "Ок, повернуся пізніше без спаму.",
         }.get(action, "Записав.")
         return InteractionResult(
-            replies=[BotReply(text)],
+            replies=[BotReply(text, keyboard="correction" if action in {"as_is", "stop"} else None)],
             entry_id=entry.id,
             snapshot_closed=True,
             should_embed_entry=True,
@@ -372,8 +341,6 @@ class InteractionService:
     ) -> bool:
         if snapshot.clarification_count >= self.settings.max_clarifications_per_snapshot:
             return False
-        if _contains_stop_phrase(text):
-            return False
         words = [word for word in text.strip().split() if word]
         if len(words) <= 3:
             return True
@@ -391,11 +358,6 @@ class InteractionService:
             local_date_value=local_date(user.timezone),
             started_at=utc_now(),
         )
-
-
-def _contains_stop_phrase(text: str) -> bool:
-    lowered = text.lower()
-    return any(phrase in lowered for phrase in STOP_PHRASES)
 
 
 def _entry_context(entry: Entry) -> dict[str, Any]:

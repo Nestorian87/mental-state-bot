@@ -14,7 +14,7 @@ async def test_record_missed_reason_resolves_prompt_and_closes_snapshot(monkeypa
     day_id = uuid4()
     missed_id = uuid4()
     entry_id = uuid4()
-    user = SimpleNamespace(id=user_id, timezone="Europe/Kiev")
+    user = SimpleNamespace(id=user_id, timezone="Europe/Kyiv")
     missed = SimpleNamespace(id=missed_id, snapshot_id=snapshot_id)
     snapshot = SimpleNamespace(id=snapshot_id, day_id=day_id)
     calls = {"resolved": [], "closed": [], "entries": [], "analyses": []}
@@ -101,7 +101,7 @@ async def test_record_missed_reason_without_open_prompt_is_only_a_reply(monkeypa
     service = InteractionService(SimpleNamespace(), None)
     result = await service.record_missed_reason(
         object(),
-        user=SimpleNamespace(id=uuid4(), timezone="Europe/Kiev"),
+        user=SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv"),
         reason_text="зайнятий",
         reason_code="busy",
     )
