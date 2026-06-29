@@ -107,7 +107,10 @@ docker compose up --build
 The container runs migrations before starting the bot. For a faster first test, start only
 PostgreSQL and run the app locally as shown above.
 
-Production is intended to use `docker-compose.prod.yml` on a VPS with an image published to GitHub Container Registry.
+Production is intended to use `docker-compose.prod.yml` on a VPS with an image published to
+GitHub Container Registry. The GitHub Actions workflow can build, push, copy deployment files
+to the VPS, and run the deploy script automatically. Runtime secrets stay in `.env` on the VPS; see
+`docs/deployment.md`.
 
 ## Telegram Commands
 

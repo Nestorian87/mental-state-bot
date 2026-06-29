@@ -1,3 +1,5 @@
+name: mental-state-bot
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -17,8 +19,7 @@ services:
   bot:
     image: ${BOT_IMAGE:?set BOT_IMAGE, for example ghcr.io/owner/mental-state-bot:latest}
     env_file:
-      - path: .env
-        required: false
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mental_state_bot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mental_state_bot}
       DATABASE_SYNC_URL: postgresql+psycopg://${POSTGRES_USER:-mental_state_bot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mental_state_bot}
