@@ -395,6 +395,18 @@ async def list_entries_without_analysis(
     return result.scalars().all()
 
 
+async def list_user_entries(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    limit: int = 100,
+) -> Sequence[Entry]:
+    result = await session.execute(
+        select(Entry).where(Entry.user_id == user_id).order_by(Entry.created_at).limit(limit)
+    )
+    return result.scalars().all()
+
+
 async def count_entries_without_analysis(
     session: AsyncSession,
     *,

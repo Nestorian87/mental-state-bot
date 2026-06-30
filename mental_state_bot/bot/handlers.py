@@ -220,7 +220,7 @@ async def photos_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         moments = await get_today_photo_moments(session, user=user)
-        text = format_photo_moments_view(moments)
+        text = format_photo_moments_view(moments, timezone=user.timezone)
     await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
     await _send_photo_moments(message, moments)
 
@@ -805,7 +805,7 @@ async def summary_detail_callback_handler(
             chart = await build_metrics_chart_png(session, user=user)
         elif section == "photos":
             moments = await get_today_photo_moments(session, user=user)
-            text = format_photo_moments_view(moments)
+            text = format_photo_moments_view(moments, timezone=user.timezone)
         else:
             text = await format_latest_summary_section(session, user=user, section=section)
     await callback.answer()

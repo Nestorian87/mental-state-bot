@@ -158,6 +158,7 @@ and daily summaries. The bot does not force a fixed reason category.
 - `mental-state-bot export <telegram-user-id> --output ./data/archive.zip --format zip` - export a portable bundle with data and media.
 - `mental-state-bot user-audit <telegram-user-id>` - print archive coverage and maintenance suggestions.
 - `mental-state-bot features-backfill <telegram-user-id> --limit 100` - generate missing AI feature analyses for old or incomplete entries.
+- `mental-state-bot features-backfill <telegram-user-id> --limit 100 --force` - re-run AI feature extraction for existing entries, useful after changing extraction prompts.
 - `mental-state-bot embed-backfill <telegram-user-id> --limit 100` - generate missing embeddings for old entries.
 
 ## Data Ownership

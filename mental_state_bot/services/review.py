@@ -4,7 +4,7 @@ import struct
 import zlib
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from decimal import Decimal
 from typing import Any
 
@@ -44,25 +44,23 @@ async def format_today_view(session: AsyncSession, *, user: User, limit: int = 1
         target_type="entry",
         target_ids=[entry.id for entry in visible_entries],
     )
+    latest_features = _latest_feature_results_by_entry(analyses)
     quality_by_entry: dict[str, str] = {}
     labels_by_entry: dict[str, list[str]] = defaultdict(list)
-    for analysis in analyses:
-        if analysis.task_name != "extract_entry_features":
-            continue
-        result = analysis.result or {}
-        quality_by_entry[str(analysis.target_id)] = result.get("data_quality") or "unknown"
-        labels_by_entry[str(analysis.target_id)].extend(result.get("activity_labels") or [])
-        labels_by_entry[str(analysis.target_id)].extend(result.get("state_labels") or [])
+    for entry_id, result in latest_features.items():
+        quality_by_entry[entry_id] = result.get("data_quality") or "unknown"
+        labels_by_entry[entry_id].extend(result.get("activity_labels") or [])
+        labels_by_entry[entry_id].extend(result.get("state_labels") or [])
 
     lines = [
-        f"Сьогодні: {len(entries)} записів.",
+        f"Сьогодні: {_entry_count_text(len(entries))}.",
         "",
     ]
     if len(entries) > limit:
         lines.append(f"Останні {limit}:")
 
     for entry in visible_entries:
-        lines.append(_format_entry_line(entry, quality_by_entry, labels_by_entry))
+        lines.append(_format_entry_line(entry, quality_by_entry, labels_by_entry, timezone=user.timezone))
 
     if day.ended_at:
         ended_at = day.ended_at.astimezone(zoneinfo(user.timezone))
@@ -79,12 +77,11 @@ async def format_raw_entries_view(session: AsyncSession, *, user: User, limit: i
         return "За сьогодні ще немає сирих записів."
 
     visible_entries = entries[-limit:]
-    lines = [f"Сирі записи за сьогодні: {len(entries)}", ""]
+    lines = [f"Сирі записи за сьогодні: {_entry_count_text(len(entries))}", ""]
     if len(entries) > limit:
         lines.append(f"Показую останні {limit}.")
     for entry in visible_entries:
-        timestamp = entry.local_timestamp or entry.created_at
-        time_text = timestamp.strftime("%H:%M") if timestamp else "??:??"
+        time_text = _entry_time_text(entry, user.timezone)
         lines.append(f"{time_text} [{_source_label(entry.source)}] {entry.raw_text or '[без тексту]'}")
     return "\n".join(lines)
 
@@ -102,11 +99,7 @@ async def format_metrics_view(session: AsyncSession, *, user: User) -> str:
         target_type="entry",
         target_ids=[entry.id for entry in entries],
     )
-    extraction_by_entry = {
-        str(analysis.target_id): analysis.result
-        for analysis in analyses
-        if analysis.task_name == "extract_entry_features"
-    }
+    extraction_by_entry = _latest_feature_results_by_entry(analyses)
 
     activity_counts: dict[str, int] = defaultdict(int)
     state_counts: dict[str, int] = defaultdict(int)
@@ -118,16 +111,16 @@ async def format_metrics_view(session: AsyncSession, *, user: User) -> str:
     for entry in entries:
         result = extraction_by_entry.get(str(entry.id), {})
         for label in result.get("activity_labels") or []:
-            activity_counts[_human_label(label)] += 1
+            activity_counts[_ai_label_text(label)] += 1
         for label in result.get("state_labels") or []:
-            state_counts[_human_label(label)] += 1
+            state_counts[_ai_label_text(label)] += 1
         quality_counts[_data_quality_label(result.get("data_quality"))] += 1
         mood_points.append(_feature_score(result.get("mood")))
         energy_points.append(_feature_score(result.get("energy")))
         pleasant_count += len(result.get("pleasant_moments") or [])
 
     lines = [
-        f"Метрики за сьогодні: {len(entries)} записів.",
+        f"Метрики за сьогодні: {_entry_count_text(len(entries))}.",
         f"Приємні/живі моменти, знайдені AI: {pleasant_count}",
         "",
         "Настрій:",
@@ -159,11 +152,7 @@ async def build_metrics_chart_png(session: AsyncSession, *, user: User) -> bytes
         target_type="entry",
         target_ids=[entry.id for entry in entries],
     )
-    extraction_by_entry = {
-        str(analysis.target_id): analysis.result
-        for analysis in analyses
-        if analysis.task_name == "extract_entry_features"
-    }
+    extraction_by_entry = _latest_feature_results_by_entry(analyses)
     mood_points = [_feature_score((extraction_by_entry.get(str(entry.id)) or {}).get("mood")) for entry in entries]
     energy_points = [
         _feature_score((extraction_by_entry.get(str(entry.id)) or {}).get("energy")) for entry in entries
@@ -181,7 +170,9 @@ async def get_today_photo_moments(session: AsyncSession, *, user: User) -> list[
     return [PhotoMoment(media=media, entry=entry) for media, entry in rows]
 
 
-def format_photo_moments_view(moments: list[PhotoMoment], *, limit: int = 12) -> str:
+def format_photo_moments_view(
+    moments: list[PhotoMoment], *, limit: int = 12, timezone: str | None = None
+) -> str:
     if not moments:
         return "За сьогодні ще немає фото."
 
@@ -194,7 +185,7 @@ def format_photo_moments_view(moments: list[PhotoMoment], *, limit: int = 12) ->
     lines.append("")
     for index, moment in enumerate(visible, start=1):
         timestamp = moment.entry.local_timestamp or moment.media.created_at or moment.entry.created_at
-        time_text = timestamp.strftime("%H:%M") if timestamp else "??:??"
+        time_text = _time_text(timestamp, timezone)
         caption = moment.entry.raw_text
         if caption == "[photo]":
             caption = None
@@ -244,8 +235,9 @@ def format_gap_report(
             ]
         )
 
+    report_tz = window_start.tzinfo
     entry_times = sorted(
-        timestamp for entry in entries if (timestamp := _entry_timestamp(entry)) is not None
+        timestamp for entry in entries if (timestamp := _entry_timestamp(entry, report_tz)) is not None
     )
     entry_times = [timestamp for timestamp in entry_times if window_start <= timestamp <= window_end]
     gaps = _gap_segments(entry_times, window_start=window_start, window_end=window_end)
@@ -525,8 +517,17 @@ def _human_label(value: str) -> str:
         "rumination": "думки по колу",
         "social_activity": "соціальна активність",
     }
-    normalized = str(value or "").strip()
-    return known.get(normalized, normalized.replace("_", " ") or "невідомо")
+    normalized = " ".join(str(value or "").strip().lower().split())
+    spaced = normalized.replace("_", " ")
+    return known.get(normalized) or known.get(spaced) or spaced or "невідомо"
+
+
+def _latest_feature_results_by_entry(analyses) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    for analysis in analyses:
+        if analysis.task_name == "extract_entry_features":
+            results[str(analysis.target_id)] = analysis.result or {}
+    return results
 
 
 def _sparkline(points: list[int | None]) -> str:
@@ -670,8 +671,9 @@ def _active_window(day: date, timezone: str, settings: UserSettings) -> tuple[da
     return start, end
 
 
-def _entry_timestamp(entry: Entry) -> datetime | None:
-    return entry.local_timestamp or entry.created_at
+def _entry_timestamp(entry: Entry, target_tz: tzinfo | None = None) -> datetime | None:
+    timestamp = entry.local_timestamp or entry.created_at
+    return _timestamp_in_timezone(timestamp, target_tz)
 
 
 def _gap_segments(
@@ -709,16 +711,60 @@ def _format_duration(duration: timedelta) -> str:
 
 
 def _format_entry_line(
-    entry: Entry, quality_by_entry: dict[str, str], labels_by_entry: dict[str, list[str]]
+    entry: Entry,
+    quality_by_entry: dict[str, str],
+    labels_by_entry: dict[str, list[str]],
+    *,
+    timezone: str | None = None,
 ) -> str:
-    timestamp = entry.local_timestamp or entry.created_at
-    time_text = timestamp.strftime("%H:%M") if timestamp else "??:??"
+    time_text = _entry_time_text(entry, timezone)
     text = _truncate(entry.raw_text or "[без тексту]", 120)
     labels = labels_by_entry.get(str(entry.id), [])
-    label_text = f" [{', '.join(_human_label(label) for label in labels[:3])}]" if labels else ""
+    label_text = f" [{', '.join(_ai_label_text(label) for label in labels[:3])}]" if labels else ""
     quality = quality_by_entry.get(str(entry.id))
     quality_text = f" ({_data_quality_label(quality)})" if quality else ""
     return f"{time_text} - {text}{label_text}{quality_text}"
+
+
+def _entry_time_text(entry: Entry, timezone: str | None = None) -> str:
+    return _time_text(entry.local_timestamp or entry.created_at, timezone)
+
+
+def _ai_label_text(value: str) -> str:
+    return " ".join(str(value or "").strip().replace("_", " ").split()) or "невідомо"
+
+
+def _time_text(timestamp: datetime | None, timezone: str | None = None) -> str:
+    if timestamp is None:
+        return "??:??"
+    if timezone:
+        timestamp = _timestamp_in_timezone(timestamp, zoneinfo(timezone))
+    return timestamp.strftime("%H:%M")
+
+
+def _timestamp_in_timezone(timestamp: datetime | None, target_tz: tzinfo | None) -> datetime | None:
+    if timestamp is None:
+        return None
+    if target_tz is None:
+        return timestamp
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=target_tz)
+    return timestamp.astimezone(target_tz)
+
+
+def _entry_count_text(count: int) -> str:
+    return f"{count} {_ukrainian_plural(count, 'запис', 'записи', 'записів')}"
+
+
+def _ukrainian_plural(count: int, one: str, few: str, many: str) -> str:
+    value = abs(count)
+    if value % 100 in {11, 12, 13, 14}:
+        return many
+    if value % 10 == 1:
+        return one
+    if value % 10 in {2, 3, 4}:
+        return few
+    return many
 
 
 def _truncate(text: str, limit: int) -> str:

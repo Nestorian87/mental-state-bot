@@ -11,7 +11,7 @@ from mental_state_bot.ai.service import AIService
 from mental_state_bot.bot.keyboards import missed_prompt_keyboard, snapshot_initial_keyboard
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
-from mental_state_bot.db.models import User, UserSettings
+from mental_state_bot.db.models import Day, Snapshot, User, UserSettings
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
     snapshots_paused,
@@ -33,8 +33,21 @@ async def maybe_send_scheduled_snapshot(
     if not _is_active_time(now, user.timezone, user_settings):
         return False
 
+    today = await repo.get_day_by_date(
+        session,
+        user_id=user.id,
+        local_date_value=local_date(user.timezone),
+    )
+    if today and today.ended_at:
+        open_snapshot = await repo.get_open_snapshot(session, user_id=user.id)
+        if open_snapshot is not None:
+            await _close_if_snapshot_day_is_closed(session, open_snapshot)
+        return False
+
     open_snapshot = await repo.get_open_snapshot(session, user_id=user.id)
     if open_snapshot is not None:
+        if await _close_if_snapshot_day_is_closed(session, open_snapshot):
+            return False
         return await _handle_open_snapshot(
             session,
             bot=bot,
@@ -76,6 +89,9 @@ async def send_snapshot_prompt(
 ) -> bool:
     now = utc_now()
     open_snapshot = await repo.get_open_snapshot(session, user_id=user.id)
+    if open_snapshot is not None and await _close_if_snapshot_day_is_closed(session, open_snapshot):
+        open_snapshot = None
+
     if open_snapshot is not None:
         return await _handle_open_snapshot(
             session,
@@ -127,6 +143,16 @@ async def send_snapshot_prompt(
         telegram_message_id=message.message_id,
         model_run_id=model_run_id,
     )
+    return True
+
+
+async def _close_if_snapshot_day_is_closed(session: AsyncSession, snapshot: Snapshot) -> bool:
+    if snapshot.day_id is None:
+        return False
+    day = await session.get(Day, snapshot.day_id)
+    if day is None or day.ended_at is None:
+        return False
+    await repo.close_snapshot(session, snapshot_id=snapshot.id, status="closed_after_day_end")
     return True
 
 

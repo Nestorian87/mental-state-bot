@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -10,6 +10,7 @@ from mental_state_bot.services.review import (
     _feature_score,
     _format_counts,
     _format_entry_line,
+    _latest_feature_results_by_entry,
     _line_chart_png,
     _sparkline,
     _truncate,
@@ -40,12 +41,31 @@ def test_format_entry_line_includes_labels_and_quality() -> None:
     line = _format_entry_line(
         entry,
         quality_by_entry={entry_id: "partial"},
-        labels_by_entry={entry_id: ["lying_down", "inability_to_start"]},
+        labels_by_entry={entry_id: ["лежання", "важко почати"]},
     )
 
     assert line.startswith("10:30 - лежу")
     assert "[лежання, важко почати]" in line
     assert "(частково)" in line
+
+
+def test_format_entry_line_converts_utc_timestamp_to_user_timezone() -> None:
+    entry_id = "123"
+    entry = SimpleNamespace(
+        id=entry_id,
+        local_timestamp=datetime(2026, 6, 29, 19, 45, tzinfo=UTC),
+        created_at=None,
+        raw_text="лягаю спати",
+    )
+
+    line = _format_entry_line(
+        entry,
+        quality_by_entry={},
+        labels_by_entry={},
+        timezone="Europe/Kyiv",
+    )
+
+    assert line.startswith("22:45 - лягаю спати")
 
 
 def test_format_similar_entries_empty() -> None:
@@ -82,6 +102,24 @@ def test_format_counts_sorts_by_count_then_name() -> None:
     text = _format_counts({"b": 2, "a": 2, "c": 1})
 
     assert text.splitlines()[:3] == ["- a: 2", "- b: 2", "- c: 1"]
+
+
+def test_latest_feature_results_prefers_newer_ai_analysis() -> None:
+    entry_id = uuid4()
+    analyses = [
+        SimpleNamespace(
+            task_name="extract_entry_features",
+            target_id=entry_id,
+            result={"state_labels": ["calm"]},
+        ),
+        SimpleNamespace(
+            task_name="extract_entry_features",
+            target_id=entry_id,
+            result={"state_labels": ["спокій"]},
+        ),
+    ]
+
+    assert _latest_feature_results_by_entry(analyses)[str(entry_id)] == {"state_labels": ["спокій"]}
 
 
 def test_format_photo_moments_view_separates_photos_from_analysis() -> None:
@@ -124,6 +162,23 @@ def test_format_gap_report_shows_notable_pauses_and_missed_prompts() -> None:
     assert "Пропущених/нагаданих зрізів: 1" in text
     assert "10:00-13:30: 3 год 30 хв" in text
     assert "12:00: відкрито" in text
+
+
+def test_format_gap_report_converts_entry_times_to_window_timezone() -> None:
+    kyiv = ZoneInfo("Europe/Kyiv")
+
+    text = format_gap_report(
+        entries=[
+            SimpleNamespace(local_timestamp=datetime(2026, 6, 29, 12, 31, tzinfo=UTC), created_at=None),
+            SimpleNamespace(local_timestamp=datetime(2026, 6, 29, 16, 45, tzinfo=UTC), created_at=None),
+        ],
+        missed_prompts=[],
+        window_start=datetime(2026, 6, 29, 9, 0, tzinfo=kyiv),
+        window_end=datetime(2026, 6, 29, 22, 46, tzinfo=kyiv),
+    )
+
+    assert "Перший запис: 15:31" in text
+    assert "Останній запис: 19:45" in text
 
 
 def test_format_gap_report_includes_missed_prompt_reason() -> None:

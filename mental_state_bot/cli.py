@@ -97,8 +97,8 @@ def embed_backfill(user_id: int, limit: int = 100) -> None:
 
 
 @app.command("features-backfill")
-def features_backfill(user_id: int, limit: int = 100) -> None:
-    """Generate missing AI feature analyses for one Telegram user's entries."""
+def features_backfill(user_id: int, limit: int = 100, force: bool = False) -> None:
+    """Generate missing AI feature analyses, or re-analyze existing entries with --force."""
     settings = get_settings()
     configure_logging(settings.log_level)
     from mental_state_bot.ai.service import AIService
@@ -114,12 +114,13 @@ def features_backfill(user_id: int, limit: int = 100) -> None:
             sessionmaker=sessionmaker,
             telegram_user_id=user_id,
             limit=limit,
+            force=force,
         )
     )
     asyncio.run(engine.dispose())
+    prefix = "Re-analyzed entry features: " if force else "Backfilled entry features: "
     typer.echo(
-        "Backfilled entry features: "
-        f"{result.processed}/{result.selected} processed, "
+        f"{prefix}{result.processed}/{result.selected} processed, "
         f"{result.skipped_missing} skipped missing"
     )
 

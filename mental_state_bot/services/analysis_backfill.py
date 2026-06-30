@@ -31,17 +31,21 @@ async def backfill_entry_features(
     sessionmaker,
     telegram_user_id: int,
     limit: int,
+    force: bool = False,
 ) -> FeatureBackfillResult:
     async with sessionmaker() as session, session.begin():
         user = await repo.get_user_by_telegram_id(session, telegram_user_id)
         if user is None:
             raise ValueError(f"Unknown Telegram user id: {telegram_user_id}")
-        entries = await repo.list_entries_without_analysis(
-            session,
-            user_id=user.id,
-            task_name=ENTRY_FEATURES_TASK,
-            limit=limit,
-        )
+        if force:
+            entries = await repo.list_user_entries(session, user_id=user.id, limit=limit)
+        else:
+            entries = await repo.list_entries_without_analysis(
+                session,
+                user_id=user.id,
+                task_name=ENTRY_FEATURES_TASK,
+                limit=limit,
+            )
         entry_ids = [entry.id for entry in entries]
         user_id = user.id
 
