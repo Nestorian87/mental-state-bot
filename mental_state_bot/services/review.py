@@ -107,17 +107,33 @@ async def format_metrics_view(session: AsyncSession, *, user: User) -> str:
     mood_points: list[int | None] = []
     energy_points: list[int | None] = []
     pleasant_count = 0
+    unnormalized_label_count = 0
 
     for entry in entries:
         result = extraction_by_entry.get(str(entry.id), {})
         for label in result.get("activity_labels") or []:
-            activity_counts[_ai_label_text(label)] += 1
+            normalized_label = _metrics_label_text(label)
+            if normalized_label is None:
+                unnormalized_label_count += 1
+                continue
+            activity_counts[normalized_label] += 1
         for label in result.get("state_labels") or []:
-            state_counts[_ai_label_text(label)] += 1
+            normalized_label = _metrics_label_text(label)
+            if normalized_label is None:
+                unnormalized_label_count += 1
+                continue
+            state_counts[normalized_label] += 1
         quality_counts[_data_quality_label(result.get("data_quality"))] += 1
         mood_points.append(_feature_score(result.get("mood")))
         energy_points.append(_feature_score(result.get("energy")))
         pleasant_count += len(result.get("pleasant_moments") or [])
+
+    metrics_notes = []
+    if unnormalized_label_count:
+        metrics_notes.append(
+            f"Ненормалізованих міток, прихованих із топів: {unnormalized_label_count}. "
+            "Для очищення старих даних можна запустити features-backfill --force."
+        )
 
     lines = [
         f"Метрики за сьогодні: {_entry_count_text(len(entries))}.",
@@ -137,6 +153,8 @@ async def format_metrics_view(session: AsyncSession, *, user: User) -> str:
         "Найчастіші активності:",
         _format_counts(activity_counts, empty="немає явних активностей"),
     ]
+    if metrics_notes:
+        lines.extend(["", "Примітки:", *metrics_notes])
     return "\n".join(lines)
 
 
@@ -409,20 +427,63 @@ def format_similar_entries(records: list[EmbeddingRecord]) -> str:
 def _feature_score(feature: object) -> int | None:
     if not isinstance(feature, dict):
         return None
-    value = str(feature.get("value") or "unclear").lower()
+    raw_value = feature.get("value")
+    if isinstance(raw_value, int | float):
+        score = int(round(raw_value))
+        return score if 1 <= score <= 8 else None
+    value = " ".join(str(raw_value or "unclear").strip().lower().replace("_", " ").split())
+    if value.isdigit():
+        score = int(value)
+        return score if 1 <= score <= 8 else None
     mapping = {
-        "very_low": 1,
+        "very low": 1,
+        "дуже низько": 1,
+        "дуже низький": 1,
+        "дуже погано": 1,
+        "дуже поганий": 1,
+        "немає сил": 1,
         "low": 2,
-        "somewhat_low": 3,
+        "низько": 2,
+        "низький": 2,
+        "погано": 2,
+        "поганий": 2,
+        "мало сил": 2,
+        "somewhat low": 3,
+        "трохи низько": 3,
+        "нижче середнього": 3,
         "mixed": 4,
         "neutral": 4,
+        "змішано": 4,
+        "нейтрально": 4,
+        "нормально": 4,
+        "нормальний": 4,
         "medium": 5,
         "moderate": 5,
-        "somewhat_high": 6,
+        "середньо": 5,
+        "помірно": 5,
+        "somewhat high": 6,
+        "трохи високо": 6,
+        "вище середнього": 6,
         "high": 7,
-        "very_high": 8,
+        "високо": 7,
+        "високий": 7,
+        "добре": 7,
+        "гарний": 7,
+        "very high": 8,
+        "дуже високо": 8,
+        "дуже високий": 8,
+        "дуже добре": 8,
     }
     return mapping.get(value)
+
+
+def _metrics_label_text(label: object) -> str | None:
+    text = _ai_label_text(label)
+    if not text or text == "невідомо":
+        return None
+    if any("a" <= char.lower() <= "z" for char in text):
+        return None
+    return text
 
 
 def _feature_value_label(value: str | None) -> str:
@@ -538,7 +599,11 @@ def _sparkline(points: list[int | None]) -> str:
     known = [point for point in points if point is not None]
     if not known:
         return "·" * len(points) + "  даних мало"
-    return "".join(chars) + f"  мін={min(known)} сер={sum(known) / len(known):.1f} макс={max(known)}"
+    return (
+        "".join(chars)
+        + f"  мін={min(known)} сер={sum(known) / len(known):.1f} "
+        + f"макс={max(known)} даних={len(known)}/{len(points)}"
+    )
 
 
 def _line_chart_png(series: dict[str, list[int | None]], width: int = 900, height: int = 420) -> bytes:

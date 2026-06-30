@@ -46,6 +46,8 @@ EXTRACTION_PROMPT = """\
 Враховуй snapshot_conversation/latest_prompt і day_context для розуміння коротких відповідей.
 Враховуй semantic_memory як додаткову довідку для повторюваних патернів, але не додавай ознак без підтвердження в записі або поточному контексті.
 Якщо щось неясно, позначай "unclear" або додавай uncertainty note.
+Для mood, energy, anxiety і social_activity поле value має бути тільки одним із:
+very_low, low, somewhat_low, neutral, somewhat_high, high, very_high, unclear.
 activity_labels і state_labels повертай короткими українськими мітками, не англійськими словами.
 """
 

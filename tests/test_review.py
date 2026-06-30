@@ -12,6 +12,7 @@ from mental_state_bot.services.review import (
     _format_entry_line,
     _latest_feature_results_by_entry,
     _line_chart_png,
+    _metrics_label_text,
     _sparkline,
     _truncate,
     format_gap_report,
@@ -76,6 +77,10 @@ def test_feature_score_maps_common_values() -> None:
     assert _feature_score({"value": "very_low"}) == 1
     assert _feature_score({"value": "neutral"}) == 4
     assert _feature_score({"value": "very_high"}) == 8
+    assert _feature_score({"value": "низько"}) == 2
+    assert _feature_score({"value": "нормальний"}) == 4
+    assert _feature_score({"value": "гарний"}) == 7
+    assert _feature_score({"value": 6}) == 6
     assert _feature_score({"value": "unclear"}) is None
     assert _feature_score(None) is None
 
@@ -85,6 +90,7 @@ def test_sparkline_handles_missing_and_known_points() -> None:
 
     assert sparkline.startswith("▁·▄█")
     assert "сер=4.3" in sparkline
+    assert "даних=3/4" in sparkline
 
 
 def test_sparkline_handles_no_known_points() -> None:
@@ -102,6 +108,12 @@ def test_format_counts_sorts_by_count_then_name() -> None:
     text = _format_counts({"b": 2, "a": 2, "c": 1})
 
     assert text.splitlines()[:3] == ["- a: 2", "- b: 2", "- c: 1"]
+
+
+def test_metrics_label_text_hides_non_normalized_english_labels() -> None:
+    assert _metrics_label_text("спокій") == "спокій"
+    assert _metrics_label_text("fear") is None
+    assert _metrics_label_text("feeling punished") is None
 
 
 def test_latest_feature_results_prefers_newer_ai_analysis() -> None:
