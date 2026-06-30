@@ -14,6 +14,10 @@ EMBEDDING_RATES_PER_MILLION: dict[str, Decimal] = {
     "text-embedding-3-large": Decimal("0.13"),
 }
 
+TRANSCRIPTION_RATES_PER_MINUTE: dict[str, Decimal] = {
+    "gpt-4o-mini-transcribe": Decimal("0.003"),
+}
+
 
 def estimate_cost_usd(provider: str, model: str, usage: Usage) -> Decimal | None:
     provider = provider.lower()
@@ -46,3 +50,18 @@ def estimate_embedding_cost_usd(model: str, usage: Usage) -> Decimal | None:
         return None
     tokens = usage.total_tokens or usage.prompt_tokens or 0
     return Decimal(tokens) * rate / Decimal(1_000_000)
+
+
+def estimate_transcription_cost_usd(model: str, duration_seconds: int | float | None) -> Decimal | None:
+    if duration_seconds is None:
+        return None
+    model_key = model.lower()
+    rate = None
+    for known_model, known_rate in TRANSCRIPTION_RATES_PER_MINUTE.items():
+        if known_model in model_key:
+            rate = known_rate
+            break
+    if rate is None:
+        return None
+    minutes = Decimal(str(max(float(duration_seconds), 0.0))) / Decimal(60)
+    return minutes * rate

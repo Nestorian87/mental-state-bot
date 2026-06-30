@@ -11,7 +11,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mental_state_bot.ai.client import OpenAICompatibleClient
-from mental_state_bot.ai.pricing import estimate_cost_usd
+from mental_state_bot.ai.pricing import estimate_cost_usd, estimate_transcription_cost_usd
 from mental_state_bot.ai.prompts import (
     CLARIFICATION_PROMPT,
     DAILY_SUMMARY_PROMPT,
@@ -54,6 +54,12 @@ class AIService:
             provider=settings.embedding_provider,
             base_url=settings.embedding_base_url,
             api_key=settings.embedding_api_key,
+            timeout_seconds=settings.ai_timeout_seconds,
+        )
+        self.transcription_client = OpenAICompatibleClient(
+            provider=settings.transcription_provider,
+            base_url=settings.transcription_base_url,
+            api_key=settings.transcription_api_key,
             timeout_seconds=settings.ai_timeout_seconds,
         )
 
@@ -254,6 +260,73 @@ class AIService:
 
     async def create_embedding(self, text: str) -> ModelCallResult:
         return await self.embedding_client.embed(model=self.settings.embedding_model, text=text)
+
+    async def transcribe_voice(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        file_path: str,
+        duration_seconds: int | None,
+    ) -> tuple[str, UUID | None]:
+        task_name = "transcribe_voice"
+        if not self.settings.transcription_enabled:
+            run = await repo.create_model_run(
+                session,
+                user_id=user_id,
+                provider=self.settings.transcription_provider,
+                model=self.settings.transcription_model,
+                task_name=task_name,
+                status="skipped_disabled",
+                meta={"duration_seconds": duration_seconds},
+            )
+            return "", run.id
+        if not self.settings.transcription_api_key:
+            run = await repo.create_model_run(
+                session,
+                user_id=user_id,
+                provider=self.settings.transcription_provider,
+                model=self.settings.transcription_model,
+                task_name=task_name,
+                status="skipped_no_api_key",
+                meta={"duration_seconds": duration_seconds},
+            )
+            return "", run.id
+
+        result = await self.transcription_client.transcribe(
+            model=self.settings.transcription_model,
+            file_path=file_path,
+            language=self.settings.transcription_language,
+            prompt=(
+                "Це коротке Telegram-голосове повідомлення для особистого щоденника. "
+                "Транскрибуй дослівно, зберігай розмовний стиль, назви треків, імена та змішану українську/англійську лексику."
+            ),
+        )
+        request_hash = self.transcription_client.request_hash(
+            {
+                "task": task_name,
+                "model": self.settings.transcription_model,
+                "file_path": file_path,
+                "duration_seconds": duration_seconds,
+            }
+        )
+        run = await repo.create_model_run(
+            session,
+            user_id=user_id,
+            provider=result.provider,
+            model=result.model,
+            task_name=task_name,
+            status="success",
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            reasoning_tokens=result.usage.reasoning_tokens,
+            total_tokens=result.usage.total_tokens,
+            estimated_cost_usd=estimate_transcription_cost_usd(result.model, duration_seconds),
+            latency_ms=result.latency_ms,
+            request_hash=request_hash,
+            meta={"duration_seconds": duration_seconds, "raw_usage": result.usage.model_dump()},
+        )
+        return result.text.strip(), run.id
 
     async def _json_task[T: BaseModel](
         self,

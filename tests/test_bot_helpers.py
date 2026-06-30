@@ -12,6 +12,7 @@ from mental_state_bot.bot.handlers import (
     _missed_reason_text,
     _split_telegram_text,
     _valid_hhmm,
+    _voice_transcription_preview,
 )
 from mental_state_bot.bot.keyboards import missed_prompt_keyboard
 from mental_state_bot.services.preferences import (
@@ -54,6 +55,15 @@ def test_help_text_mentions_core_commands() -> None:
     assert "/resume" in text
     assert "/gaps" in text
     assert "/audit" in text
+    assert "голосові" in text
+
+
+def test_voice_transcription_preview_quotes_and_truncates() -> None:
+    text = _voice_transcription_preview("  " + "слово " * 300, limit=20)
+
+    assert text.startswith("«слово")
+    assert text.endswith("…»")
+    assert len(text) <= 22
 
 
 def test_is_sleep_marker_text_matches_only_narrow_phrases() -> None:

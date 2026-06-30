@@ -132,6 +132,49 @@ class OpenAICompatibleClient:
             raw=raw,
         )
 
+    async def transcribe(
+        self,
+        *,
+        model: str,
+        file_path: str,
+        language: str | None = None,
+        prompt: str | None = None,
+    ) -> ModelCallResult:
+        if not self.api_key:
+            raise RuntimeError("Transcription API key is not configured")
+
+        started = time.perf_counter()
+        data = {"model": model, "response_format": "json"}
+        if language:
+            data["language"] = language
+        if prompt:
+            data["prompt"] = prompt
+
+        with open(file_path, "rb") as audio_file:
+            files = {"file": audio_file}
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(
+                    self._url("/audio/transcriptions"),
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    data=data,
+                    files=files,
+                )
+                response.raise_for_status()
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        raw = response.json()
+        text = raw.get("text") or ""
+        usage = _parse_usage(raw.get("usage") or {})
+        return ModelCallResult(
+            provider=self.provider,
+            model=model,
+            task_name="transcribe_voice",
+            text=text,
+            data={"text": text},
+            usage=usage,
+            latency_ms=latency_ms,
+            raw=raw,
+        )
+
     def request_hash(self, payload: Any) -> str:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()

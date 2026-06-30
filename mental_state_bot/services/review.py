@@ -562,6 +562,7 @@ def _task_label(value: str | None) -> str:
         "monthly_summary_semantic_context": "пам’ять для місячного підсумку",
         "embed_entry": "вектор пам’яті для запису",
         "similar_entries": "пошук схожих моментів",
+        "transcribe_voice": "транскрипція голосового",
     }
     return labels.get(str(value or "unknown").lower(), _human_label(str(value or "невідомо")))
 

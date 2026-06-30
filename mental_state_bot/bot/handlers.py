@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
@@ -58,6 +59,20 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 SLEEP_MARKER_TEXT = "лягаю спати"
+
+
+@dataclass(frozen=True)
+class VoiceNoteTranscription:
+    text: str
+    original_path: Path | None
+    transcription_path: Path | None
+    transcription_run_id: UUID | None
+    duration_seconds: int | None
+    mime_type: str | None
+    file_size: int | None
+    telegram_file_id: str
+    telegram_file_unique_id: str
+    error: str | None = None
 
 
 @router.message(CommandStart())
@@ -1022,7 +1037,7 @@ async def period_callback_handler(
     await _answer_long_text(callback.message, text, reply_markup=main_reply_keyboard())
 
 
-@router.message((F.text & ~F.text.startswith("/")) | F.caption | F.photo)
+@router.message((F.text & ~F.text.startswith("/")) | F.caption | F.photo | F.voice)
 async def entry_handler(
     message: Message,
     bot: Bot,
@@ -1039,12 +1054,34 @@ async def entry_handler(
     should_embed = False
     replies = []
     user_id = None
+    voice_note: VoiceNoteTranscription | None = None
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         user_id = user.id
+        if message.voice:
+            voice_note = await _transcribe_voice_note(
+                bot=bot,
+                settings=settings,
+                session=session,
+                message=message,
+                user_id=user.id,
+                ai_service=interaction_service.ai,
+            )
+            if voice_note.text:
+                text = voice_note.text
+            else:
+                hint = (
+                    "Не зміг розшифрувати голосове повідомлення. "
+                    "Можна повторити голосом або написати цей момент текстом."
+                )
+                if voice_note.error:
+                    hint += f"\n\nТехнічно: {voice_note.error}"
+                replies = [BotReply(hint)]
         user_settings = await repo.get_user_settings(session, user.id)
         pending_kind = pending_input(user_settings)
-        if pending_kind and not message.photo:
+        if replies:
+            pass
+        elif pending_kind and not message.photo:
             result = await _handle_pending_input(
                 session=session,
                 user=user,
@@ -1082,6 +1119,19 @@ async def entry_handler(
             replies = result.replies
             if message.photo and entry_id is not None:
                 await _store_photo(bot, settings, session, message, user.id, entry_id)
+
+        if voice_note and entry_id is not None:
+            await _store_voice_note(session, user_id=user.id, entry_id=entry_id, voice_note=voice_note)
+        if voice_note and voice_note.text and entry_id is not None:
+            replies = [
+                BotReply(
+                    "Транскрипція голосового:\n"
+                    f"{_voice_transcription_preview(voice_note.text)}\n\n"
+                    "Якщо я розшифрував неточно, натисни «Виправити» або напиши `виправлення: ...`.",
+                    keyboard="correction",
+                ),
+                *replies,
+            ]
 
     for reply in replies:
         await message.answer(
@@ -1282,6 +1332,141 @@ async def _store_photo(
     )
 
 
+async def _transcribe_voice_note(
+    *,
+    bot: Bot,
+    settings: Settings,
+    session: AsyncSession,
+    message: Message,
+    user_id: UUID,
+    ai_service: AIService,
+) -> VoiceNoteTranscription:
+    voice = message.voice
+    if voice is None:
+        raise ValueError("Message has no Telegram voice payload")
+
+    user_dir = settings.media_root / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    original_path = user_dir / f"{message.message_id}-{voice.file_unique_id}.ogg"
+    transcription_path: Path | None = None
+    try:
+        await bot.download(voice.file_id, destination=original_path)
+        transcription_path = await _convert_voice_note_for_transcription(original_path)
+        text, run_id = await ai_service.transcribe_voice(
+            session,
+            user_id=user_id,
+            file_path=str(transcription_path),
+            duration_seconds=voice.duration,
+        )
+        return VoiceNoteTranscription(
+            text=text,
+            original_path=original_path,
+            transcription_path=transcription_path,
+            transcription_run_id=run_id,
+            duration_seconds=voice.duration,
+            mime_type=voice.mime_type,
+            file_size=voice.file_size,
+            telegram_file_id=voice.file_id,
+            telegram_file_unique_id=voice.file_unique_id,
+        )
+    except FileNotFoundError:
+        logger.exception("ffmpeg is not available for Telegram voice transcription")
+        return _failed_voice_note(
+            voice,
+            original_path=original_path if original_path.exists() else None,
+            transcription_path=transcription_path,
+            error="на сервері немає ffmpeg для підготовки Telegram voice",
+        )
+    except Exception as exc:
+        logger.exception("Telegram voice transcription failed")
+        return _failed_voice_note(
+            voice,
+            original_path=original_path if original_path.exists() else None,
+            transcription_path=transcription_path,
+            error=str(exc),
+        )
+
+
+async def _convert_voice_note_for_transcription(original_path: Path) -> Path:
+    transcription_path = original_path.with_suffix(".webm")
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(original_path),
+        "-vn",
+        "-c:a",
+        "libopus",
+        str(transcription_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await process.communicate()
+    if process.returncode != 0:
+        message = stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(message or "ffmpeg не зміг підготувати Telegram voice")
+    return transcription_path
+
+
+async def _store_voice_note(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    entry_id: UUID,
+    voice_note: VoiceNoteTranscription,
+) -> None:
+    await repo.add_media(
+        session,
+        user_id=user_id,
+        entry_id=entry_id,
+        media_type="voice",
+        telegram_file_id=voice_note.telegram_file_id,
+        telegram_file_unique_id=voice_note.telegram_file_unique_id,
+        file_path=str(voice_note.original_path) if voice_note.original_path else None,
+        meta={
+            "duration_seconds": voice_note.duration_seconds,
+            "mime_type": voice_note.mime_type,
+            "file_size": voice_note.file_size,
+            "transcription_file_path": (
+                str(voice_note.transcription_path) if voice_note.transcription_path else None
+            ),
+            "transcription_run_id": (
+                str(voice_note.transcription_run_id) if voice_note.transcription_run_id else None
+            ),
+            "transcription_text": voice_note.text,
+            "transcription_error": voice_note.error,
+        },
+    )
+
+
+def _failed_voice_note(
+    voice,
+    *,
+    original_path: Path | None,
+    transcription_path: Path | None,
+    error: str,
+) -> VoiceNoteTranscription:
+    return VoiceNoteTranscription(
+        text="",
+        original_path=original_path,
+        transcription_path=transcription_path,
+        transcription_run_id=None,
+        duration_seconds=voice.duration,
+        mime_type=voice.mime_type,
+        file_size=voice.file_size,
+        telegram_file_id=voice.file_id,
+        telegram_file_unique_id=voice.file_unique_id,
+        error=error,
+    )
+
+
+def _voice_transcription_preview(text: str, limit: int = 900) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) > limit:
+        compact = compact[: limit - 1].rstrip() + "…"
+    return f"«{compact}»"
+
+
 async def _send_photo_moments(message: Message, moments: list[PhotoMoment], *, limit: int = 12) -> None:
     visible = moments[-limit:]
     sendable: list[FSInputFile | str] = []
@@ -1450,6 +1635,7 @@ def _help_text() -> str:
             "/costs - витрати й токени",
             "/audit - стан архіву й покриття даних",
             "/settings - налаштування",
+            "Можна надсилати текст, фото або Telegram-голосові повідомлення.",
             "стиль: ... - власний стиль питань і коротких відповідей",
             "скинути стиль - прибрати власний стиль",
             "/pause - поставити автоматичні зрізи на паузу",

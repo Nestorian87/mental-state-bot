@@ -162,6 +162,10 @@ and daily summaries. The bot does not force a fixed reason category.
 - `mental-state-bot embed-backfill <telegram-user-id> --limit 100` - generate missing embeddings for old entries.
 - `mental-state-bot embed-backfill <telegram-user-id> --limit 100 --force` - rebuild entry embeddings after re-analysis or corrections.
 
+Telegram voice messages are supported when `TRANSCRIPTION_API_KEY` is configured. The default
+model is `gpt-4o-mini-transcribe`; the bot stores the original voice note, shows the transcript
+before the normal AI reply, and keeps the usual correction flow available if the transcript is wrong.
+
 ## Data Ownership
 
 Raw text, photos, AI analysis, embeddings metadata, model usage, and summaries are stored separately so exports can preserve both original data and model-derived interpretation.

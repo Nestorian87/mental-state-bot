@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
+    transcription_enabled: bool = True
+    transcription_provider: str = "openai"
+    transcription_base_url: str = "https://api.openai.com/v1"
+    transcription_api_key: str = ""
+    transcription_model: str = "gpt-4o-mini-transcribe"
+    transcription_language: str = "uk"
+
     @field_validator("telegram_allowed_user_ids", mode="before")
     @classmethod
     def parse_allowed_user_ids(cls, value: Any) -> list[int]:
