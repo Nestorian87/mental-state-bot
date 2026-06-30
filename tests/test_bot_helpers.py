@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 from mental_state_bot.bot.handlers import (
+    VoiceNoteTranscription,
     _archive_export_options,
     _command_argument,
     _format_settings_text,
@@ -10,15 +13,21 @@ from mental_state_bot.bot.handlers import (
     _help_text,
     _is_sleep_marker_text,
     _missed_reason_text,
+    _pending_voice_note_payload,
     _split_telegram_text,
     _valid_hhmm,
+    _voice_note_from_pending,
     _voice_transcription_preview,
 )
-from mental_state_bot.bot.keyboards import missed_prompt_keyboard
+from mental_state_bot.bot.keyboards import missed_prompt_keyboard, voice_transcription_keyboard
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
+    pending_input,
+    pending_voice_transcript,
     settings_json_with_custom_interaction_style,
+    settings_json_with_pending_voice_transcript,
     settings_json_with_snapshot_pause,
+    settings_json_without_pending_voice_transcript,
     snapshots_paused,
 )
 
@@ -64,6 +73,63 @@ def test_voice_transcription_preview_quotes_and_truncates() -> None:
     assert text.startswith("«слово")
     assert text.endswith("…»")
     assert len(text) <= 22
+
+
+def test_voice_transcription_keyboard_exposes_confirm_fix_cancel() -> None:
+    keyboard = voice_transcription_keyboard()
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert callbacks == {"voice:confirm", "voice:fix", "voice:cancel"}
+
+
+def test_pending_voice_note_payload_roundtrip_keeps_original_transcript() -> None:
+    run_id = uuid4()
+    voice_note = VoiceNoteTranscription(
+        text="В цілому я почуваюся добре.",
+        original_text="В цілому я почуваюся добре.",
+        original_path=Path("/tmp/voice.ogg"),
+        transcription_path=Path("/tmp/voice.webm"),
+        transcription_run_id=run_id,
+        duration_seconds=3,
+        mime_type="audio/ogg",
+        file_size=1024,
+        telegram_file_id="file-id",
+        telegram_file_unique_id="unique-id",
+    )
+
+    payload = _pending_voice_note_payload(
+        voice_note,
+        telegram_message_id=10,
+        reply_to_message_id=None,
+    )
+    restored = _voice_note_from_pending(payload, text="В цілому ти почуваєшся добре.")
+
+    assert payload["telegram_message_id"] == 10
+    assert restored.text == "В цілому ти почуваєшся добре."
+    assert restored.original_text == "В цілому я почуваюся добре."
+    assert restored.transcription_run_id == run_id
+    assert restored.telegram_file_unique_id == "unique-id"
+
+
+def test_voice_transcript_pending_state_roundtrip() -> None:
+    settings = SimpleNamespace(settings_json={})
+    settings.settings_json = settings_json_with_pending_voice_transcript(
+        settings,
+        {"text": "транскрипція"},
+    )
+
+    assert pending_input(settings) == "voice_transcript"
+    assert pending_voice_transcript(settings) == {"text": "транскрипція"}
+
+    settings.settings_json = settings_json_without_pending_voice_transcript(settings)
+
+    assert pending_input(settings) is None
+    assert pending_voice_transcript(settings) is None
 
 
 def test_is_sleep_marker_text_matches_only_narrow_phrases() -> None:

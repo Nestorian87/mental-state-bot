@@ -19,6 +19,7 @@ from mental_state_bot.bot.keyboards import (
     sleep_confirmation_keyboard,
     snapshot_clarification_keyboard,
     summary_detail_keyboard,
+    voice_transcription_keyboard,
 )
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
@@ -30,11 +31,14 @@ from mental_state_bot.services.memory import MemoryService
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
     pending_input,
+    pending_voice_transcript,
     settings_json_with_custom_interaction_style,
     settings_json_with_pending_input,
+    settings_json_with_pending_voice_transcript,
     settings_json_with_snapshot_pause,
     settings_json_with_user_profile_context,
     settings_json_without_pending_input,
+    settings_json_without_pending_voice_transcript,
     snapshots_paused,
     user_profile_context,
 )
@@ -64,6 +68,7 @@ SLEEP_MARKER_TEXT = "лягаю спати"
 @dataclass(frozen=True)
 class VoiceNoteTranscription:
     text: str
+    original_text: str | None
     original_path: Path | None
     transcription_path: Path | None
     transcription_run_id: UUID | None
@@ -1016,6 +1021,67 @@ async def correction_start_callback_handler(
     )
 
 
+@router.callback_query(F.data.startswith("voice:"))
+async def voice_transcription_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    interaction_service: InteractionService,
+    memory_service: MemoryService,
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    action = (callback.data or "").split(":", maxsplit=1)[1]
+    entry_id: UUID | None = None
+    should_embed = False
+    replies: list[BotReply] = []
+    user_id: UUID | None = None
+
+    await _clear_inline_keyboard(callback)
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        user_id = user.id
+        user_settings = await repo.get_user_settings(session, user.id)
+        if action == "cancel":
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={"settings_json": settings_json_without_pending_voice_transcript(user_settings)},
+            )
+            replies = [BotReply("Ок, не записую це голосове.")]
+        elif action == "fix":
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={
+                    "settings_json": settings_json_with_pending_input(
+                        user_settings,
+                        "voice_transcript_fix",
+                    )
+                },
+            )
+            replies = [BotReply("Напиши наступним повідомленням правильний текст голосового.")]
+        else:
+            result = await _confirm_pending_voice_transcript(
+                session=session,
+                user=user,
+                user_settings=user_settings,
+                interaction_service=interaction_service,
+            )
+            entry_id = result.entry_id
+            should_embed = result.should_embed_entry
+            replies = result.replies
+
+    await callback.answer()
+    for reply in replies:
+        await callback.message.answer(
+            reply.text,
+            reply_markup=_inline_reply_keyboard(reply.keyboard) or main_reply_keyboard(),
+        )
+    if should_embed and entry_id and user_id:
+        asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
+
+
 @router.callback_query(F.data.startswith("period:"))
 async def period_callback_handler(
     callback: CallbackQuery,
@@ -1069,6 +1135,32 @@ async def entry_handler(
             )
             if voice_note.text:
                 text = voice_note.text
+                await repo.update_user_settings(
+                    session,
+                    user_id=user.id,
+                    values={
+                        "settings_json": settings_json_with_pending_voice_transcript(
+                            await repo.get_user_settings(session, user.id),
+                            _pending_voice_note_payload(
+                                voice_note,
+                                telegram_message_id=message.message_id,
+                                reply_to_message_id=(
+                                    message.reply_to_message.message_id
+                                    if message.reply_to_message
+                                    else None
+                                ),
+                            ),
+                        )
+                    },
+                )
+                replies = [
+                    BotReply(
+                        "Перевір транскрипцію голосового:\n"
+                        f"{_voice_transcription_preview(text)}\n\n"
+                        "Якщо все правильно, підтвердь. Якщо ні — натисни «Виправити текст» або просто надішли правильний текст наступним повідомленням.",
+                        keyboard="voice_transcript",
+                    )
+                ]
             else:
                 hint = (
                     "Не зміг розшифрувати голосове повідомлення. "
@@ -1122,16 +1214,6 @@ async def entry_handler(
 
         if voice_note and entry_id is not None:
             await _store_voice_note(session, user_id=user.id, entry_id=entry_id, voice_note=voice_note)
-        if voice_note and voice_note.text and entry_id is not None:
-            replies = [
-                BotReply(
-                    "Транскрипція голосового:\n"
-                    f"{_voice_transcription_preview(voice_note.text)}\n\n"
-                    "Якщо я розшифрував неточно, натисни «Виправити» або напиши `виправлення: ...`.",
-                    keyboard="correction",
-                ),
-                *replies,
-            ]
 
     for reply in replies:
         await message.answer(
@@ -1295,12 +1377,77 @@ async def _handle_pending_input(
             telegram_message_id=message.message_id,
             reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None,
         )
+    if pending_kind in {"voice_transcript", "voice_transcript_fix"}:
+        return await _confirm_pending_voice_transcript(
+            session=session,
+            user=user,
+            user_settings=user_settings,
+            interaction_service=interaction_service,
+            corrected_text=text,
+            fallback_message_id=message.message_id,
+            fallback_reply_to_message_id=(
+                message.reply_to_message.message_id if message.reply_to_message else None
+            ),
+        )
     await repo.update_user_settings(
         session,
         user_id=user.id,
         values={"settings_json": settings_json_without_pending_input(user_settings)},
     )
     return InteractionResult(replies=[BotReply("Скинув незавершене очікування вводу.")], snapshot_closed=True)
+
+
+async def _confirm_pending_voice_transcript(
+    *,
+    session: AsyncSession,
+    user,
+    user_settings: UserSettings,
+    interaction_service: InteractionService,
+    corrected_text: str | None = None,
+    fallback_message_id: int | None = None,
+    fallback_reply_to_message_id: int | None = None,
+) -> InteractionResult:
+    pending = pending_voice_transcript(user_settings)
+    if not pending:
+        await repo.update_user_settings(
+            session,
+            user_id=user.id,
+            values={"settings_json": settings_json_without_pending_voice_transcript(user_settings)},
+        )
+        return InteractionResult(
+            replies=[BotReply("Не бачу голосового, яке чекає підтвердження.")],
+            snapshot_closed=True,
+        )
+
+    text = " ".join((corrected_text or pending.get("text") or "").split())
+    if not text:
+        return InteractionResult(
+            replies=[BotReply("Транскрипція порожня. Надішли правильний текст або скасуй голосове.")],
+            snapshot_closed=True,
+        )
+
+    result = await interaction_service.handle_text_entry(
+        session,
+        user=user,
+        text=text,
+        telegram_message_id=_pending_int(pending.get("telegram_message_id")) or fallback_message_id,
+        reply_to_message_id=(
+            _pending_int(pending.get("reply_to_message_id")) or fallback_reply_to_message_id
+        ),
+    )
+    if result.entry_id is not None:
+        await _store_voice_note(
+            session,
+            user_id=user.id,
+            entry_id=result.entry_id,
+            voice_note=_voice_note_from_pending(pending, text=text),
+        )
+    await repo.update_user_settings(
+        session,
+        user_id=user.id,
+        values={"settings_json": settings_json_without_pending_voice_transcript(user_settings)},
+    )
+    return result
 
 
 async def _store_photo(
@@ -1360,6 +1507,7 @@ async def _transcribe_voice_note(
         )
         return VoiceNoteTranscription(
             text=text,
+            original_text=text,
             original_path=original_path,
             transcription_path=transcription_path,
             transcription_run_id=run_id,
@@ -1434,9 +1582,77 @@ async def _store_voice_note(
                 str(voice_note.transcription_run_id) if voice_note.transcription_run_id else None
             ),
             "transcription_text": voice_note.text,
+            "original_transcription_text": voice_note.original_text,
             "transcription_error": voice_note.error,
         },
     )
+
+
+def _pending_voice_note_payload(
+    voice_note: VoiceNoteTranscription,
+    *,
+    telegram_message_id: int | None,
+    reply_to_message_id: int | None,
+) -> dict[str, object]:
+    return {
+        "text": voice_note.text,
+        "original_text": voice_note.original_text or voice_note.text,
+        "original_path": str(voice_note.original_path) if voice_note.original_path else None,
+        "transcription_path": (
+            str(voice_note.transcription_path) if voice_note.transcription_path else None
+        ),
+        "transcription_run_id": (
+            str(voice_note.transcription_run_id) if voice_note.transcription_run_id else None
+        ),
+        "duration_seconds": voice_note.duration_seconds,
+        "mime_type": voice_note.mime_type,
+        "file_size": voice_note.file_size,
+        "telegram_file_id": voice_note.telegram_file_id,
+        "telegram_file_unique_id": voice_note.telegram_file_unique_id,
+        "telegram_message_id": telegram_message_id,
+        "reply_to_message_id": reply_to_message_id,
+    }
+
+
+def _voice_note_from_pending(pending: dict[str, object], *, text: str) -> VoiceNoteTranscription:
+    return VoiceNoteTranscription(
+        text=text,
+        original_text=str(pending.get("original_text") or pending.get("text") or ""),
+        original_path=_optional_path(pending.get("original_path")),
+        transcription_path=_optional_path(pending.get("transcription_path")),
+        transcription_run_id=_optional_uuid(pending.get("transcription_run_id")),
+        duration_seconds=_pending_int(pending.get("duration_seconds")),
+        mime_type=_optional_str(pending.get("mime_type")),
+        file_size=_pending_int(pending.get("file_size")),
+        telegram_file_id=str(pending.get("telegram_file_id") or ""),
+        telegram_file_unique_id=str(pending.get("telegram_file_unique_id") or ""),
+    )
+
+
+def _optional_path(value: object) -> Path | None:
+    return Path(str(value)) if value else None
+
+
+def _optional_uuid(value: object) -> UUID | None:
+    if not value:
+        return None
+    try:
+        return UUID(str(value))
+    except ValueError:
+        return None
+
+
+def _optional_str(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _pending_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _failed_voice_note(
@@ -1448,6 +1664,7 @@ def _failed_voice_note(
 ) -> VoiceNoteTranscription:
     return VoiceNoteTranscription(
         text="",
+        original_text=None,
         original_path=original_path,
         transcription_path=transcription_path,
         transcription_run_id=None,
@@ -1560,6 +1777,8 @@ def _inline_reply_keyboard(kind: str | None):
         return snapshot_clarification_keyboard()
     if kind == "correction":
         return correction_keyboard()
+    if kind == "voice_transcript":
+        return voice_transcription_keyboard()
     if kind == "sleep_confirm":
         return sleep_confirmation_keyboard()
     return None

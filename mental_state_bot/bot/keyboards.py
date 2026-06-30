@@ -55,6 +55,18 @@ def correction_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def voice_transcription_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Так, зберегти", callback_data="voice:confirm")],
+            [
+                InlineKeyboardButton(text="Виправити текст", callback_data="voice:fix"),
+                InlineKeyboardButton(text="Скасувати", callback_data="voice:cancel"),
+            ],
+        ]
+    )
+
+
 def sleep_confirmation_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

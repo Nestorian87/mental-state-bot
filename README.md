@@ -163,8 +163,8 @@ and daily summaries. The bot does not force a fixed reason category.
 - `mental-state-bot embed-backfill <telegram-user-id> --limit 100 --force` - rebuild entry embeddings after re-analysis or corrections.
 
 Telegram voice messages are supported when `TRANSCRIPTION_API_KEY` is configured. The default
-model is `gpt-4o-mini-transcribe`; the bot stores the original voice note, shows the transcript
-before the normal AI reply, and keeps the usual correction flow available if the transcript is wrong.
+model is `gpt-4o-mini-transcribe`; the bot stores the original voice note, asks you to confirm
+or edit the transcript first, and only then saves the diary entry and runs the normal AI reply.
 
 ## Data Ownership
 
