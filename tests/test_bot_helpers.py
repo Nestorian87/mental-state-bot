@@ -19,7 +19,11 @@ from mental_state_bot.bot.handlers import (
     _voice_note_from_pending,
     _voice_transcription_preview,
 )
-from mental_state_bot.bot.keyboards import missed_prompt_keyboard, voice_transcription_keyboard
+from mental_state_bot.bot.keyboards import (
+    main_reply_keyboard,
+    missed_prompt_keyboard,
+    voice_transcription_keyboard,
+)
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
     pending_input,
@@ -49,6 +53,18 @@ def test_split_telegram_text_keeps_chunks_under_limit() -> None:
 
     assert len(chunks) > 1
     assert all(len(chunk) <= 100 for chunk in chunks)
+
+
+def test_main_reply_keyboard_uses_contextual_placeholder() -> None:
+    keyboard = main_reply_keyboard("Напиши, що я зрозумів не так")
+
+    assert keyboard.input_field_placeholder == "Напиши, що я зрозумів не так"
+
+
+def test_main_reply_keyboard_limits_long_placeholder() -> None:
+    keyboard = main_reply_keyboard("x" * 80)
+
+    assert keyboard.input_field_placeholder == "x" * 64
 
 
 def test_help_text_mentions_core_commands() -> None:

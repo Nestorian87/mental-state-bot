@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -9,6 +11,7 @@ from uuid import UUID
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, InputMediaPhoto, Message
+from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from mental_state_bot.ai.service import AIService
@@ -123,16 +126,17 @@ async def snapshot_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         user_settings = await repo.get_user_settings(session, user.id)
-        sent = await send_snapshot_prompt(
-            session,
-            bot=bot,
-            ai_service=ai_service,
-            user=user,
-            user_settings=user_settings,
-            intent="manual_snapshot",
-            scheduled_for=None,
-            photo_prompt_chance=settings.photo_prompt_chance,
-        )
+        async with _typing(message, bot):
+            sent = await send_snapshot_prompt(
+                session,
+                bot=bot,
+                ai_service=ai_service,
+                user=user,
+                user_settings=user_settings,
+                intent="manual_snapshot",
+                scheduled_for=None,
+                photo_prompt_chance=settings.photo_prompt_chance,
+            )
     if not sent:
         await message.answer("Зараз уже є відкритий зріз. Можна відповісти на нього або відкласти кнопкою.")
 
@@ -159,7 +163,7 @@ async def today_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         text = await format_today_view(session, user=user)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
 
 
 @router.message(F.text == "Сьогодні")
@@ -182,7 +186,7 @@ async def costs_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         text = await format_cost_report(session, user=user)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
 
 
 @router.message(Command("audit"))
@@ -197,7 +201,7 @@ async def audit_command_handler(
         user = await _get_or_create_message_user(session, message, settings)
         audit = await build_archive_audit(session, settings=settings, user=user)
         text = format_archive_audit(audit)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
 
 
 @router.message(Command("metrics"))
@@ -212,7 +216,7 @@ async def metrics_command_handler(
         user = await _get_or_create_message_user(session, message, settings)
         text = await format_metrics_view(session, user=user)
         chart = await build_metrics_chart_png(session, user=user)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
     if chart is not None:
         await message.answer_photo(
             BufferedInputFile(chart, filename="metrics.png"),
@@ -241,7 +245,7 @@ async def photos_command_handler(
         user = await _get_or_create_message_user(session, message, settings)
         moments = await get_today_photo_moments(session, user=user)
         text = format_photo_moments_view(moments, timezone=user.timezone)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
     await _send_photo_moments(message, moments)
 
 
@@ -265,7 +269,7 @@ async def gaps_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         text = await format_gaps_view(session, user=user)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
 
 
 @router.message(F.text == "Прогалини")
@@ -288,7 +292,7 @@ async def raw_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         text = await format_raw_entries_view(session, user=user)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
 
 
 @router.message(Command("week"))
@@ -302,9 +306,10 @@ async def week_command_handler(
         return
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
-        summary = await summary_service.generate_current_week_summary(session, user=user)
+        async with _typing(message):
+            summary = await summary_service.generate_current_week_summary(session, user=user)
         text = format_period_summary(summary)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
 
 
 @router.message(Command("month"))
@@ -318,9 +323,10 @@ async def month_command_handler(
         return
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
-        summary = await summary_service.generate_current_month_summary(session, user=user)
+        async with _typing(message):
+            summary = await summary_service.generate_current_month_summary(session, user=user)
         text = format_period_summary(summary)
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
 
 
 @router.message(Command("report"))
@@ -335,7 +341,7 @@ async def report_command_handler(
         user = await _get_or_create_message_user(session, message, settings)
         metrics = await format_metrics_view(session, user=user)
         timeline = await format_today_view(session, user=user, limit=24)
-    await _answer_long_text(message, timeline + "\n\n" + metrics, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, timeline + "\n\n" + metrics)
 
 
 @router.message(Command("similar"))
@@ -356,9 +362,10 @@ async def similar_command_handler(
         return
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
-        records = await memory_service.similar_entries(session, user_id=user.id, query_text=query, limit=6)
+        async with _typing(message):
+            records = await memory_service.similar_entries(session, user_id=user.id, query_text=query, limit=6)
         text = format_similar_entries(list(records))
-    await _answer_long_text(message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(message, text)
 
 
 @router.message(Command("settings"))
@@ -400,7 +407,7 @@ async def custom_style_message_handler(
     if not style:
         await message.answer(
             "Напиши після `стиль:` як саме хочеш, щоб бот формулював питання й короткі відповіді.",
-            reply_markup=main_reply_keyboard(),
+            reply_markup=main_reply_keyboard("Опиши бажаний стиль"),
         )
         return
     async with sessionmaker() as session, session.begin():
@@ -417,7 +424,7 @@ async def custom_style_message_handler(
             user_settings=user_settings,
             snapshots_are_paused=snapshots_paused(user_settings),
         )
-    await message.answer("Записав власний стиль взаємодії.", reply_markup=main_reply_keyboard())
+    await message.answer("Записав власний стиль взаємодії.")
     await message.answer(text, reply_markup=settings_keyboard(user_settings=user_settings))
 
 
@@ -441,7 +448,7 @@ async def reset_custom_style_message_handler(
             user_settings=user_settings,
             snapshots_are_paused=snapshots_paused(user_settings),
         )
-    await message.answer("Власний стиль скинуто.", reply_markup=main_reply_keyboard())
+    await message.answer("Власний стиль скинуто.")
     await message.answer(text, reply_markup=settings_keyboard(user_settings=user_settings))
 
 
@@ -457,7 +464,7 @@ async def profile_context_message_handler(
     if not context:
         await message.answer(
             "Напиши після `контекст:` кілька речень про себе, роботу, побут або слова, які бот має розуміти.",
-            reply_markup=main_reply_keyboard(),
+            reply_markup=main_reply_keyboard("Напиши контекст про себе"),
         )
         return
     async with sessionmaker() as session, session.begin():
@@ -474,7 +481,7 @@ async def profile_context_message_handler(
             user_settings=user_settings,
             snapshots_are_paused=snapshots_paused(user_settings),
         )
-    await message.answer("Записав загальний контекст про тебе.", reply_markup=main_reply_keyboard())
+    await message.answer("Записав загальний контекст про тебе.")
     await message.answer(text, reply_markup=settings_keyboard(user_settings=user_settings))
 
 
@@ -498,7 +505,7 @@ async def reset_profile_context_message_handler(
             user_settings=user_settings,
             snapshots_are_paused=snapshots_paused(user_settings),
         )
-    await message.answer("Загальний контекст скинуто.", reply_markup=main_reply_keyboard())
+    await message.answer("Загальний контекст скинуто.")
     await message.answer(text, reply_markup=settings_keyboard(user_settings=user_settings))
 
 
@@ -516,7 +523,7 @@ async def correction_message_handler(
     if not correction:
         await message.answer(
             "Напиши після `виправлення:` що саме бот зрозумів не так.",
-            reply_markup=main_reply_keyboard(),
+            reply_markup=main_reply_keyboard("Напиши, що я зрозумів не так"),
         )
         return
     async with sessionmaker() as session, session.begin():
@@ -540,7 +547,7 @@ async def correction_message_handler(
         replies = result.replies
         should_embed = result.should_embed_entry
     for reply in replies:
-        await message.answer(reply.text, reply_markup=main_reply_keyboard())
+        await message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
 
@@ -584,7 +591,7 @@ async def resume_handler(
             user_id=user.id,
             values={"settings_json": settings_json_with_snapshot_pause(user_settings, False)},
         )
-    await message.answer("Ок, автоматичні зрізи знову увімкнені.", reply_markup=main_reply_keyboard())
+    await message.answer("Ок, автоматичні зрізи знову увімкнені.")
 
 
 @router.message(Command("set_active"))
@@ -674,7 +681,8 @@ async def summary_command_handler(
     summary = None
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
-        summary = await summary_service.generate_today_summary(session, user=user)
+        async with _typing(message):
+            summary = await summary_service.generate_today_summary(session, user=user)
     await message.answer(summary.short_text, reply_markup=summary_detail_keyboard())
 
 
@@ -764,7 +772,7 @@ async def today_callback_handler(
         user = await _get_or_create_callback_user(session, callback, settings)
         text = await format_today_view(session, user=user)
     await callback.answer()
-    await _answer_long_text(callback.message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(callback.message, text)
 
 
 @router.callback_query(F.data == "day:metrics")
@@ -780,7 +788,7 @@ async def metrics_callback_handler(
         text = await format_metrics_view(session, user=user)
         chart = await build_metrics_chart_png(session, user=user)
     await callback.answer()
-    await _answer_long_text(callback.message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(callback.message, text)
     if chart is not None:
         await callback.message.answer_photo(
             BufferedInputFile(chart, filename="metrics.png"),
@@ -800,7 +808,7 @@ async def gaps_callback_handler(
         user = await _get_or_create_callback_user(session, callback, settings)
         text = await format_gaps_view(session, user=user)
     await callback.answer()
-    await _answer_long_text(callback.message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(callback.message, text)
 
 
 @router.callback_query(F.data.startswith("summary:"))
@@ -859,7 +867,7 @@ async def costs_callback_handler(
         user = await _get_or_create_callback_user(session, callback, settings)
         text = await format_cost_report(session, user=user)
     await callback.answer()
-    await _answer_long_text(callback.message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(callback.message, text)
 
 
 @router.callback_query(F.data == "archive:audit")
@@ -875,7 +883,7 @@ async def audit_callback_handler(
         audit = await build_archive_audit(session, settings=settings, user=user)
         text = format_archive_audit(audit)
     await callback.answer()
-    await _answer_long_text(callback.message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(callback.message, text)
 
 
 @router.callback_query(F.data.startswith("settings:"))
@@ -980,14 +988,14 @@ async def settings_callback_handler(
             "Напиши наступним повідомленням, як саме мені формулювати питання й короткі відповіді.\n\n"
             "Наприклад: коротко, без підбадьорювання, але не сухо; якщо відповідь нечітка — уточнюй м’яко.\n\n"
             "Також можна будь-коли написати `стиль: ...` або `скинути стиль`.",
-            reply_markup=main_reply_keyboard(),
+            reply_markup=main_reply_keyboard("Опиши бажаний стиль"),
         )
         return
     if action == "settings:profile_context":
         await callback.message.answer(
             "Напиши наступним повідомленням загальний контекст про себе: хто ти, чим займаєшся, що зараз важливо знати, які слова або обставини мені варто розуміти.\n\n"
             "Також можна будь-коли написати `контекст: ...` або `скинути контекст`.",
-            reply_markup=main_reply_keyboard(),
+            reply_markup=main_reply_keyboard("Напиши контекст про себе"),
         )
         return
     try:
@@ -1017,7 +1025,7 @@ async def correction_start_callback_handler(
     await callback.message.answer(
         "Напиши наступним повідомленням, що саме я зрозумів не так і як це краще трактувати.\n\n"
         "Також можна будь-коли написати `виправлення: ...`.",
-        reply_markup=main_reply_keyboard(),
+        reply_markup=main_reply_keyboard("Напиши, що я зрозумів не так"),
     )
 
 
@@ -1062,21 +1070,27 @@ async def voice_transcription_callback_handler(
             )
             replies = [BotReply("Напиши наступним повідомленням правильний текст голосового.")]
         else:
-            result = await _confirm_pending_voice_transcript(
-                session=session,
-                user=user,
-                user_settings=user_settings,
-                interaction_service=interaction_service,
-            )
+            async with _typing(callback.message):
+                result = await _confirm_pending_voice_transcript(
+                    session=session,
+                    user=user,
+                    user_settings=user_settings,
+                    interaction_service=interaction_service,
+                )
             entry_id = result.entry_id
             should_embed = result.should_embed_entry
             replies = result.replies
 
     await callback.answer()
     for reply in replies:
+        fallback_markup = (
+            main_reply_keyboard("Надішли правильний текст голосового")
+            if action == "fix"
+            else None
+        )
         await callback.message.answer(
             reply.text,
-            reply_markup=_inline_reply_keyboard(reply.keyboard) or main_reply_keyboard(),
+            reply_markup=_inline_reply_keyboard(reply.keyboard) or fallback_markup,
         )
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
@@ -1094,13 +1108,14 @@ async def period_callback_handler(
     period = callback.data.split(":", maxsplit=1)[1]
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
-        if period == "month":
-            summary = await summary_service.generate_current_month_summary(session, user=user)
-        else:
-            summary = await summary_service.generate_current_week_summary(session, user=user)
+        async with _typing(callback.message):
+            if period == "month":
+                summary = await summary_service.generate_current_month_summary(session, user=user)
+            else:
+                summary = await summary_service.generate_current_week_summary(session, user=user)
         text = format_period_summary(summary)
     await callback.answer()
-    await _answer_long_text(callback.message, text, reply_markup=main_reply_keyboard())
+    await _answer_long_text(callback.message, text)
 
 
 @router.message((F.text & ~F.text.startswith("/")) | F.caption | F.photo | F.voice)
@@ -1125,14 +1140,15 @@ async def entry_handler(
         user = await _get_or_create_message_user(session, message, settings)
         user_id = user.id
         if message.voice:
-            voice_note = await _transcribe_voice_note(
-                bot=bot,
-                settings=settings,
-                session=session,
-                message=message,
-                user_id=user.id,
-                ai_service=interaction_service.ai,
-            )
+            async with _typing(message, bot):
+                voice_note = await _transcribe_voice_note(
+                    bot=bot,
+                    settings=settings,
+                    session=session,
+                    message=message,
+                    user_id=user.id,
+                    ai_service=interaction_service.ai,
+                )
             if voice_note.text:
                 text = voice_note.text
                 await repo.update_user_settings(
@@ -1174,38 +1190,41 @@ async def entry_handler(
         if replies:
             pass
         elif pending_kind and not message.photo:
-            result = await _handle_pending_input(
-                session=session,
-                user=user,
-                user_settings=user_settings,
-                pending_kind=pending_kind,
-                text=text,
-                message=message,
-                interaction_service=interaction_service,
-            )
+            async with _typing(message, bot):
+                result = await _handle_pending_input(
+                    session=session,
+                    user=user,
+                    user_settings=user_settings,
+                    pending_kind=pending_kind,
+                    text=text,
+                    message=message,
+                    interaction_service=interaction_service,
+                )
             entry_id = result.entry_id
             should_embed = result.should_embed_entry
             replies = result.replies
         elif not message.photo and _is_sleep_marker_text(text):
             replies = [BotReply("Закрити день і згенерувати підсумок?", keyboard="sleep_confirm")]
         elif not message.photo and (missed_reason := _missed_reason_text(text)):
-            result = await interaction_service.record_missed_reason(
-                session,
-                user=user,
-                reason_text=missed_reason,
-                reason_code="custom",
-            )
+            async with _typing(message, bot):
+                result = await interaction_service.record_missed_reason(
+                    session,
+                    user=user,
+                    reason_text=missed_reason,
+                    reason_code="custom",
+                )
             entry_id = result.entry_id
             should_embed = result.should_embed_entry
             replies = result.replies
         else:
-            result = await interaction_service.handle_text_entry(
-                session,
-                user=user,
-                text=text,
-                telegram_message_id=message.message_id,
-                reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None,
-            )
+            async with _typing(message, bot):
+                result = await interaction_service.handle_text_entry(
+                    session,
+                    user=user,
+                    text=text,
+                    telegram_message_id=message.message_id,
+                    reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None,
+                )
             entry_id = result.entry_id
             should_embed = result.should_embed_entry
             replies = result.replies
@@ -1235,7 +1254,10 @@ async def missed_reason_callback_handler(
     if reason_code == "custom":
         await callback.answer()
         await _clear_inline_keyboard(callback)
-        await callback.message.answer("Можеш коротко написати причину у форматі: причина: ...")
+        await callback.message.answer(
+            "Можеш коротко написати причину у форматі: причина: ...",
+            reply_markup=main_reply_keyboard("причина: що завадило відповісти"),
+        )
         return
     await callback.answer("Не впізнав дію", show_alert=True)
 
@@ -1267,7 +1289,7 @@ async def snapshot_callback_handler(
     for reply in replies:
         await callback.message.answer(
             reply.text,
-            reply_markup=_inline_reply_keyboard(reply.keyboard) or main_reply_keyboard(),
+            reply_markup=_inline_reply_keyboard(reply.keyboard),
         )
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
@@ -1285,7 +1307,8 @@ async def sleep_callback_handler(
     await _clear_inline_keyboard(callback)
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
-        summary = await summary_service.close_today_with_summary(session, user=user)
+        async with _typing(callback.message):
+            summary = await summary_service.close_today_with_summary(session, user=user)
     await callback.answer("День закрито")
     await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard())
 
@@ -1296,7 +1319,7 @@ async def sleep_cancel_callback_handler(callback: CallbackQuery, settings: Setti
         return
     await callback.answer("Скасовано")
     await _clear_inline_keyboard(callback)
-    await callback.message.answer("Ок, день не закриваю.", reply_markup=main_reply_keyboard())
+    await callback.message.answer("Ок, день не закриваю.")
 
 
 @router.callback_query(F.data == "day:summary")
@@ -1310,7 +1333,8 @@ async def day_summary_callback_handler(
         return
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
-        summary = await summary_service.generate_today_summary(session, user=user)
+        async with _typing(callback.message):
+            summary = await summary_service.generate_today_summary(session, user=user)
     await callback.answer()
     await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard())
 
@@ -1761,6 +1785,31 @@ async def _allowed_callback(callback: CallbackQuery, settings: Settings) -> bool
         await callback.answer("Немає доступу", show_alert=True)
         return False
     return True
+
+
+@asynccontextmanager
+async def _typing(message: Message | None, bot: Bot | None = None) -> AsyncIterator[None]:
+    if message is None:
+        yield
+        return
+    action_bot = bot or getattr(message, "bot", None)
+    if action_bot is None:
+        yield
+        return
+    sender = ChatActionSender.typing(chat_id=message.chat.id, bot=action_bot)
+    try:
+        await sender.__aenter__()
+    except Exception:
+        logger.debug("Could not send typing chat action", exc_info=True)
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            await sender.__aexit__(None, None, None)
+        except Exception:
+            logger.debug("Could not stop typing chat action", exc_info=True)
 
 
 async def _clear_inline_keyboard(callback: CallbackQuery) -> None:

@@ -11,7 +11,9 @@ from mental_state_bot.db.models import UserSettings
 from mental_state_bot.services.preferences import snapshots_paused
 
 
-def main_reply_keyboard() -> ReplyKeyboardMarkup:
+def main_reply_keyboard(
+    placeholder: str = "Напиши момент або надішли голосове",
+) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Новий зріз"), KeyboardButton(text="Сьогодні")],
@@ -20,7 +22,7 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Лягаю спати")],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Можна написати будь-який момент",
+        input_field_placeholder=placeholder[:64],
     )
 
 
