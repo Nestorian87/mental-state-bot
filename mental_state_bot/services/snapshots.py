@@ -17,6 +17,7 @@ from mental_state_bot.services.preferences import (
     snapshots_paused,
     user_profile_context,
 )
+from mental_state_bot.services.semantic_context import semantic_memory_context
 from mental_state_bot.time_utils import local_date, parse_hhmm, utc_now, zoneinfo
 
 
@@ -117,6 +118,21 @@ async def send_snapshot_prompt(
         trigger="manual" if scheduled_for is None else "scheduled",
         photo_prompt_opportunity=random.random() < photo_prompt_chance,
     )
+    ai_settings = getattr(ai_service, "settings", None)
+    context["semantic_memory"] = (
+        await semantic_memory_context(
+            session,
+            settings=ai_settings,
+            ai_service=ai_service,
+            user=user,
+            query_text=_question_query_text(context),
+            task_name="snapshot_question_semantic_context",
+            limit=6,
+            exclude_entry_ids={str(entry.id) for entry in day_entries},
+        )
+        if ai_settings is not None
+        else []
+    )
     snapshot = await repo.create_snapshot(
         session,
         user_id=user.id,
@@ -179,7 +195,7 @@ def snapshot_question_context(
             _entry_context(entry)
             for entry in recent_entries
         ],
-        "day_context": [_entry_context(entry) for entry in (day_entries or [])],
+        "day_context": _day_context(day_entries or []),
         "style": {
             "tone": user_settings.tone,
             "humanity_level": user_settings.humanity_level,
@@ -201,6 +217,16 @@ def snapshot_question_context(
     }
 
 
+def _day_context(entries, *, limit: int = 80) -> dict[str, Any]:
+    entries = list(entries)
+    visible_entries = entries[-limit:]
+    return {
+        "entry_count": len(entries),
+        "omitted_entry_count": max(0, len(entries) - len(visible_entries)),
+        "entries": [_entry_context(entry) for entry in visible_entries],
+    }
+
+
 def _entry_context(entry) -> dict[str, Any]:
     return {
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
@@ -208,6 +234,16 @@ def _entry_context(entry) -> dict[str, Any]:
         "source": entry.source,
         "raw_text": entry.raw_text,
     }
+
+
+def _question_query_text(context: dict[str, Any]) -> str:
+    day_entries = context.get("day_context", {}).get("entries") or []
+    recent_entries = context.get("recent_entries") or []
+    parts = [
+        *(str(entry.get("raw_text") or "") for entry in day_entries[-8:]),
+        *(str(entry.get("raw_text") or "") for entry in recent_entries[-4:]),
+    ]
+    return " ".join(part for part in parts if part).strip()
 
 
 async def _handle_open_snapshot(

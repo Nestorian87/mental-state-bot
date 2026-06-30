@@ -104,7 +104,8 @@ def test_snapshot_question_context_includes_photo_and_body_preferences() -> None
     )
 
     assert context["recent_entries"][0]["raw_text"] == "лежу і не можу почати"
-    assert context["day_context"][0]["raw_text"] == "лежу і не можу почати"
+    assert context["day_context"]["entries"][0]["raw_text"] == "лежу і не можу почати"
+    assert context["day_context"]["entry_count"] == 1
     assert context["style"]["custom_interaction_style"] == "не звучати як терапевт"
     assert context["question_preferences"]["ask_body_signals"] is True
     assert context["question_preferences"]["photo_prompts_enabled"] is True

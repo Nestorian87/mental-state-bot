@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, desc, func, select, update
+from sqlalchemy import and_, delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mental_state_bot.db.models import (
@@ -220,6 +220,19 @@ async def get_snapshot_prompts(
     result = await session.execute(
         select(SnapshotPrompt)
         .where(SnapshotPrompt.snapshot_id == snapshot_id)
+        .order_by(SnapshotPrompt.sent_at)
+    )
+    return result.scalars().all()
+
+
+async def list_prompts_for_snapshots(
+    session: AsyncSession, *, snapshot_ids: Sequence[uuid.UUID]
+) -> Sequence[SnapshotPrompt]:
+    if not snapshot_ids:
+        return []
+    result = await session.execute(
+        select(SnapshotPrompt)
+        .where(SnapshotPrompt.snapshot_id.in_(snapshot_ids))
         .order_by(SnapshotPrompt.sent_at)
     )
     return result.scalars().all()
@@ -868,6 +881,24 @@ async def add_embedding(
     session.add(record)
     await session.flush()
     return record
+
+
+async def delete_embeddings_for_target_model(
+    session: AsyncSession,
+    *,
+    target_type: str,
+    target_id: uuid.UUID,
+    provider: str,
+    model: str,
+) -> None:
+    await session.execute(
+        delete(EmbeddingRecord).where(
+            EmbeddingRecord.target_type == target_type,
+            EmbeddingRecord.target_id == target_id,
+            EmbeddingRecord.provider == provider,
+            EmbeddingRecord.model == model,
+        )
+    )
 
 
 async def find_similar_embeddings(

@@ -113,6 +113,7 @@ class SummaryService:
                     "uncertainty_notes": analysis.uncertainty_notes,
                 }
             )
+        snapshot_conversations = await _snapshot_conversations_from_entries(session, entries=entries)
         context = {
             "date": day.local_date.isoformat(),
             "user_profile_context": user_profile_context(user_settings),
@@ -125,11 +126,13 @@ class SummaryService:
                     "created_at": entry.created_at.isoformat() if entry.created_at else None,
                     "local_timestamp": entry.local_timestamp.isoformat() if entry.local_timestamp else None,
                     "source": entry.source,
+                    "snapshot_id": str(entry.snapshot_id) if entry.snapshot_id else None,
                     "raw_text": entry.raw_text,
                     "analyses": analyses_by_entry.get(str(entry.id), []),
                 }
                 for entry in entries
             ],
+            "snapshot_conversations": snapshot_conversations,
             "entry_count": len(entries),
             "missed_prompts": [
                 {
@@ -292,6 +295,11 @@ class SummaryService:
             if analysis.task_name != "extract_entry_features":
                 continue
             analyses_by_entry[str(analysis.target_id)] = analysis.result
+        selected_entries = entries[-120:]
+        snapshot_conversations = await _snapshot_conversations_from_entries(
+            session,
+            entries=selected_entries,
+        )
 
         context = {
             "period_type": period_type,
@@ -320,14 +328,17 @@ class SummaryService:
             ],
             "selected_entries": [
                 {
+                    "id": str(entry.id),
                     "created_at": entry.created_at.isoformat() if entry.created_at else None,
                     "local_timestamp": entry.local_timestamp.isoformat() if entry.local_timestamp else None,
+                    "snapshot_id": str(entry.snapshot_id) if entry.snapshot_id else None,
                     "source": entry.source,
                     "raw_text": entry.raw_text,
                     "features": analyses_by_entry.get(str(entry.id), {}),
                 }
-                for entry in entries[-120:]
+                for entry in selected_entries
             ],
+            "snapshot_conversations": snapshot_conversations,
         }
         context["semantic_memory"] = await self._semantic_memory_context(
             session,
@@ -415,6 +426,56 @@ class SummaryService:
                 extra={"user_id": str(user.id), "task_name": task_name, "error": str(exc)},
             )
             return []
+
+
+async def _snapshot_conversations_from_entries(
+    session: AsyncSession, *, entries: Sequence[Entry]
+) -> dict[str, dict[str, Any]]:
+    snapshot_ids = sorted({entry.snapshot_id for entry in entries if entry.snapshot_id}, key=str)
+    if not snapshot_ids:
+        return {}
+    prompts = await repo.list_prompts_for_snapshots(session, snapshot_ids=snapshot_ids)
+    prompts_by_snapshot: dict[str, list[dict[str, Any]]] = {str(snapshot_id): [] for snapshot_id in snapshot_ids}
+    entries_by_snapshot: dict[str, list[dict[str, Any]]] = {str(snapshot_id): [] for snapshot_id in snapshot_ids}
+
+    for prompt in prompts:
+        prompts_by_snapshot.setdefault(str(prompt.snapshot_id), []).append(
+            {
+                "role": "bot",
+                "kind": prompt.prompt_kind,
+                "text": prompt.text,
+                "sent_at": prompt.sent_at.isoformat() if prompt.sent_at else None,
+            }
+        )
+    for entry in entries:
+        if not entry.snapshot_id:
+            continue
+        entries_by_snapshot.setdefault(str(entry.snapshot_id), []).append(
+            {
+                "role": "user",
+                "entry_id": str(entry.id),
+                "created_at": entry.created_at.isoformat() if entry.created_at else None,
+                "local_timestamp": entry.local_timestamp.isoformat() if entry.local_timestamp else None,
+                "source": entry.source,
+                "raw_text": entry.raw_text,
+            }
+        )
+
+    conversations: dict[str, dict[str, Any]] = {}
+    for snapshot_id in {**prompts_by_snapshot, **entries_by_snapshot}:
+        prompt_context = prompts_by_snapshot.get(snapshot_id, [])
+        entry_context = entries_by_snapshot.get(snapshot_id, [])
+        transcript = sorted(
+            [*prompt_context, *entry_context],
+            key=lambda item: item.get("sent_at") or item.get("local_timestamp") or item.get("created_at") or "",
+        )
+        conversations[snapshot_id] = {
+            "latest_prompt": prompt_context[-1]["text"] if prompt_context else None,
+            "transcript": transcript,
+            "prompts": prompt_context,
+            "entries": entry_context,
+        }
+    return conversations
 
 
 def _day_period_bounds(day: Day, timezone: str) -> tuple[datetime, datetime]:

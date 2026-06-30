@@ -64,20 +64,57 @@ async def test_day_context_includes_all_day_entries(monkeypatch) -> None:
 
     monkeypatch.setattr(interactions_module.repo, "list_day_entries", list_day_entries)
 
-    assert await _day_context(object(), day=day) == [
+    assert await _day_context(object(), day=day) == {
+        "entry_count": 2,
+        "omitted_entry_count": 0,
+        "entries": [
+            {
+                "created_at": None,
+                "local_timestamp": None,
+                "source": "manual",
+                "raw_text": "ранкова кава",
+            },
+            {
+                "created_at": None,
+                "local_timestamp": None,
+                "source": "snapshot_response",
+                "raw_text": "мастеринг",
+            },
+        ],
+    }
+
+
+async def test_day_context_reports_omitted_entries(monkeypatch) -> None:
+    day = SimpleNamespace(id=uuid4())
+    entries = [
+        SimpleNamespace(created_at=None, local_timestamp=None, source="manual", raw_text=f"запис {index}")
+        for index in range(3)
+    ]
+
+    async def list_day_entries(session, *, day_id):
+        assert day_id == day.id
+        return entries
+
+    monkeypatch.setattr(interactions_module.repo, "list_day_entries", list_day_entries)
+
+    assert await _day_context(object(), day=day, limit=2) == {
+        "entry_count": 3,
+        "omitted_entry_count": 1,
+        "entries": [
         {
             "created_at": None,
             "local_timestamp": None,
             "source": "manual",
-            "raw_text": "ранкова кава",
+            "raw_text": "запис 1",
         },
         {
             "created_at": None,
             "local_timestamp": None,
-            "source": "snapshot_response",
-            "raw_text": "мастеринг",
+            "source": "manual",
+            "raw_text": "запис 2",
         },
-    ]
+        ],
+    }
 
 
 async def test_record_missed_reason_resolves_prompt_and_closes_snapshot(monkeypatch) -> None:
@@ -199,7 +236,7 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     )
     snapshot = SimpleNamespace(id=snapshot_id, context_json={"intent": "state_and_activity"})
     user = SimpleNamespace(id=user_id, timezone="Europe/Kyiv")
-    calls = {"micro_context": None, "analyses": []}
+    calls = {"feature_context": None, "micro_context": None, "analyses": []}
 
     class FakeSession:
         async def get(self, model, item_id):
@@ -252,6 +289,9 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     async def add_ai_analysis(session, **kwargs):
         calls["analyses"].append(kwargs)
 
+    async def analyze_entry_features(session, **kwargs):
+        calls["feature_context"] = kwargs
+
     monkeypatch.setattr(interactions_module.repo, "get_or_create_day", get_or_create_day)
     monkeypatch.setattr(interactions_module.repo, "get_recent_entries", get_recent_entries)
     monkeypatch.setattr(interactions_module.repo, "add_entry", add_entry)
@@ -260,6 +300,7 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     monkeypatch.setattr(interactions_module.repo, "get_snapshot_prompts", get_snapshot_prompts)
     monkeypatch.setattr(interactions_module.repo, "list_snapshot_entries", list_snapshot_entries)
     monkeypatch.setattr(interactions_module.repo, "add_ai_analysis", add_ai_analysis)
+    monkeypatch.setattr(interactions_module, "analyze_entry_features", analyze_entry_features)
 
     service = InteractionService(SimpleNamespace(ai_provider="deepseek", ai_live_model="flash"), FakeAI())
     result = await service.record_correction(
@@ -274,4 +315,7 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     assert result.replies[-1].keyboard == "correction"
     assert calls["micro_context"]["latest_prompt"] == "Який трек мастериш?"
     assert calls["micro_context"]["original_entry"]["raw_text"] == '"Море" прямо зараз'
+    assert calls["feature_context"]["entry"] is target
+    assert calls["feature_context"]["extra_context"]["latest_prompt"] == "Який трек мастериш?"
+    assert calls["feature_context"]["extra_context"]["correction_text"] == 'Ні, "Море" це назва треку'
     assert calls["analyses"][0]["target_id"] == correction_id

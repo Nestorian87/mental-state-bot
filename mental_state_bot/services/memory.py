@@ -20,7 +20,14 @@ class MemoryService:
         self.settings = settings
         self.ai = ai_service
 
-    async def embed_entry(self, session: AsyncSession, *, entry: Entry, user_id: UUID) -> None:
+    async def embed_entry(
+        self,
+        session: AsyncSession,
+        *,
+        entry: Entry,
+        user_id: UUID,
+        replace_existing: bool = False,
+    ) -> None:
         if not self.settings.embeddings_enabled:
             return
         if not self.settings.embedding_api_key:
@@ -28,15 +35,13 @@ class MemoryService:
             return
 
         analyses = await repo.list_analyses_for_targets(session, target_type="entry", target_ids=[entry.id])
-        features = next((item.result for item in analyses if item.task_name == "extract_entry_features"), {})
-        micro_summary = next(
-            (
-                item.result.get("text")
-                for item in analyses
-                if item.task_name == "generate_micro_summary" and isinstance(item.result, dict)
-            ),
-            "",
-        )
+        features = {}
+        micro_summary = ""
+        for item in analyses:
+            if item.task_name == "extract_entry_features":
+                features = item.result or {}
+            elif item.task_name == "generate_micro_summary" and isinstance(item.result, dict):
+                micro_summary = item.result.get("text") or ""
         semantic_text, _ = await self.ai.generate_semantic_memory_text(
             session,
             user_id=user_id,
@@ -103,6 +108,14 @@ class MemoryService:
             latency_ms=result.latency_ms,
             meta={"target_type": "entry", "target_id": str(entry.id)},
         )
+        if replace_existing:
+            await repo.delete_embeddings_for_target_model(
+                session,
+                target_type="entry",
+                target_id=entry.id,
+                provider=result.provider,
+                model=result.model,
+            )
         await repo.add_embedding(
             session,
             user_id=user_id,
@@ -156,6 +169,7 @@ async def backfill_entry_embeddings(
     sessionmaker,
     telegram_user_id: int,
     limit: int,
+    force: bool = False,
 ) -> int:
     if not settings.embeddings_enabled:
         raise RuntimeError("Embeddings are disabled")
@@ -167,12 +181,15 @@ async def backfill_entry_embeddings(
         user = await repo.get_user_by_telegram_id(session, telegram_user_id)
         if user is None:
             raise ValueError(f"Unknown Telegram user id: {telegram_user_id}")
-        entries = await repo.list_entries_without_embedding(
-            session,
-            user_id=user.id,
-            embedding_model=settings.embedding_model,
-            limit=limit,
-        )
+        if force:
+            entries = await repo.list_user_entries(session, user_id=user.id, limit=limit)
+        else:
+            entries = await repo.list_entries_without_embedding(
+                session,
+                user_id=user.id,
+                embedding_model=settings.embedding_model,
+                limit=limit,
+            )
         entry_ids = [entry.id for entry in entries]
         user_id = user.id
 
@@ -182,6 +199,11 @@ async def backfill_entry_embeddings(
             entry = await repo.get_entry(session, entry_id=entry_id)
             if entry is None:
                 continue
-            await memory_service.embed_entry(session, entry=entry, user_id=user_id)
+            await memory_service.embed_entry(
+                session,
+                entry=entry,
+                user_id=user_id,
+                replace_existing=force,
+            )
             processed += 1
     return processed

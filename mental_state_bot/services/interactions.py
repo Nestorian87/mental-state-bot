@@ -13,6 +13,7 @@ from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, Entry, Snapshot, User, UserSettings
 from mental_state_bot.services.analysis_backfill import analyze_entry_features
 from mental_state_bot.services.preferences import custom_interaction_style, user_profile_context
+from mental_state_bot.services.semantic_context import semantic_memory_context
 from mental_state_bot.time_utils import local_date, local_now, utc_now
 
 
@@ -62,6 +63,14 @@ class InteractionService:
                 source="manual",
             )
             day_context = await _day_context(session, day=day)
+            semantic_memory = await _live_semantic_context(
+                self,
+                session=session,
+                user=user,
+                query_text=_live_query_text(text=text, day_context=day_context),
+                task_name="micro_summary_semantic_context",
+                exclude_entry_ids={entry.id},
+            )
             micro_summary, _ = await self.ai.generate_micro_summary(
                 session,
                 user_id=user.id,
@@ -70,6 +79,7 @@ class InteractionService:
                     "source": "manual",
                     "style": style_context,
                     "day_context": day_context,
+                    "semantic_memory": semantic_memory,
                 },
             )
             await self._store_micro_summary(session, user=user, entry=entry, micro_summary=micro_summary.text)
@@ -96,6 +106,18 @@ class InteractionService:
             recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=5)
             snapshot_conversation = await _snapshot_conversation_context(session, snapshot=open_snapshot)
             day_context = await _day_context(session, day=day)
+            semantic_memory = await _live_semantic_context(
+                self,
+                session=session,
+                user=user,
+                query_text=_live_query_text(
+                    text=text,
+                    day_context=day_context,
+                    snapshot_conversation=snapshot_conversation,
+                ),
+                task_name="clarification_semantic_context",
+                exclude_entry_ids={entry.id},
+            )
             clarification, model_run_id = await self.ai.generate_clarification(
                 session,
                 user_id=user.id,
@@ -106,6 +128,7 @@ class InteractionService:
                     "snapshot_conversation": snapshot_conversation,
                     "latest_prompt": snapshot_conversation.get("latest_prompt"),
                     "day_context": day_context,
+                    "semantic_memory": semantic_memory,
                     "style": style_context,
                 },
             )
@@ -128,6 +151,18 @@ class InteractionService:
 
         snapshot_conversation = await _snapshot_conversation_context(session, snapshot=open_snapshot)
         day_context = await _day_context(session, day=day)
+        semantic_memory = await _live_semantic_context(
+            self,
+            session=session,
+            user=user,
+            query_text=_live_query_text(
+                text=text,
+                day_context=day_context,
+                snapshot_conversation=snapshot_conversation,
+            ),
+            task_name="micro_summary_semantic_context",
+            exclude_entry_ids={entry.id},
+        )
         micro_summary, _ = await self.ai.generate_micro_summary(
             session,
             user_id=user.id,
@@ -137,6 +172,7 @@ class InteractionService:
                 "snapshot_conversation": snapshot_conversation,
                 "latest_prompt": snapshot_conversation.get("latest_prompt"),
                 "day_context": day_context,
+                "semantic_memory": semantic_memory,
                 "source": "snapshot_response",
                 "style": style_context,
             },
@@ -242,6 +278,37 @@ class InteractionService:
             if snapshot is not None
             else None
         )
+        semantic_memory = await _live_semantic_context(
+            self,
+            session=session,
+            user=user,
+            query_text=_live_query_text(
+                text=correction_text,
+                day_context=day_context,
+                snapshot_conversation=snapshot_conversation,
+            ),
+            task_name="correction_semantic_context",
+            exclude_entry_ids={target.id} if target else set(),
+        )
+        if target is not None:
+            await analyze_entry_features(
+                session,
+                settings=self.settings,
+                ai_service=self.ai,
+                user_id=user.id,
+                entry=target,
+                extra_context={
+                    "correction_text": correction_text,
+                    "snapshot_context": snapshot.context_json if snapshot else None,
+                    "snapshot_conversation": snapshot_conversation,
+                    "latest_prompt": (
+                        snapshot_conversation.get("latest_prompt") if snapshot_conversation else None
+                    ),
+                    "day_context": day_context,
+                    "semantic_memory": semantic_memory,
+                    "backfill": False,
+                },
+            )
         micro_summary, _ = await self.ai.generate_micro_summary(
             session,
             user_id=user.id,
@@ -254,6 +321,7 @@ class InteractionService:
                 "snapshot_conversation": snapshot_conversation,
                 "latest_prompt": snapshot_conversation.get("latest_prompt") if snapshot_conversation else None,
                 "day_context": day_context,
+                "semantic_memory": semantic_memory,
                 "style": style_context,
             },
         )
@@ -342,6 +410,11 @@ class InteractionService:
             local_timestamp=local_now(user.timezone),
             meta={},
         )
+        snapshot_conversation = (
+            await _snapshot_conversation_context(session, snapshot=snapshot)
+            if snapshot
+            else None
+        )
         await analyze_entry_features(
             session,
             settings=self.settings,
@@ -350,10 +423,9 @@ class InteractionService:
             entry=entry,
             extra_context={
                 "snapshot_context": snapshot.context_json if snapshot else None,
-                "snapshot_conversation": (
-                    await _snapshot_conversation_context(session, snapshot=snapshot)
-                    if snapshot
-                    else None
+                "snapshot_conversation": snapshot_conversation,
+                "latest_prompt": (
+                    snapshot_conversation.get("latest_prompt") if snapshot_conversation else None
                 ),
                 "day_context": await _day_context(session, day=day),
                 "backfill": False,
@@ -422,9 +494,14 @@ def _entry_context(entry: Entry) -> dict[str, Any]:
     }
 
 
-async def _day_context(session: AsyncSession, *, day: Day) -> list[dict[str, Any]]:
+async def _day_context(session: AsyncSession, *, day: Day, limit: int = 80) -> dict[str, Any]:
     entries = await repo.list_day_entries(session, day_id=day.id)
-    return [_entry_context(entry) for entry in entries]
+    visible_entries = list(entries)[-limit:]
+    return {
+        "entry_count": len(entries),
+        "omitted_entry_count": max(0, len(entries) - len(visible_entries)),
+        "entries": [_entry_context(entry) for entry in visible_entries],
+    }
 
 
 async def _snapshot_conversation_context(
@@ -448,13 +525,57 @@ async def _snapshot_conversation_context(
         }
         for entry in entries
     ]
+    transcript = sorted(
+        [*prompt_context, *entry_context],
+        key=lambda item: item.get("sent_at") or item.get("local_timestamp") or item.get("created_at") or "",
+    )
     return {
         "snapshot_id": str(snapshot.id),
         "initial_context": snapshot.context_json,
         "latest_prompt": prompt_context[-1]["text"] if prompt_context else None,
+        "transcript": transcript,
         "prompts": prompt_context,
         "entries": entry_context,
     }
+
+
+async def _live_semantic_context(
+    service: InteractionService,
+    *,
+    session: AsyncSession,
+    user: User,
+    query_text: str,
+    task_name: str,
+    exclude_entry_ids: set[uuid.UUID] | set[str],
+) -> list[dict]:
+    return await semantic_memory_context(
+        session,
+        settings=service.settings,
+        ai_service=service.ai,
+        user=user,
+        query_text=query_text,
+        task_name=task_name,
+        limit=6,
+        exclude_entry_ids=exclude_entry_ids,
+    )
+
+
+def _live_query_text(
+    *,
+    text: str,
+    day_context: dict[str, Any],
+    snapshot_conversation: dict[str, Any] | None = None,
+) -> str:
+    day_tail = " ".join(
+        str(entry.get("raw_text") or "") for entry in (day_context.get("entries") or [])[-8:]
+    )
+    transcript_tail = ""
+    if snapshot_conversation:
+        transcript_tail = " ".join(
+            str(turn.get("text") or turn.get("raw_text") or "")
+            for turn in (snapshot_conversation.get("transcript") or [])[-8:]
+        )
+    return " ".join(part for part in [day_tail, transcript_tail, text] if part).strip()
 
 
 def _style_context(settings: UserSettings) -> dict[str, str | None]:

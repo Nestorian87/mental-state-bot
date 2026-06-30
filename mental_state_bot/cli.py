@@ -73,8 +73,8 @@ def export(
 
 
 @app.command("embed-backfill")
-def embed_backfill(user_id: int, limit: int = 100) -> None:
-    """Generate missing embeddings for one Telegram user's entries."""
+def embed_backfill(user_id: int, limit: int = 100, force: bool = False) -> None:
+    """Generate missing embeddings, or rebuild existing entry embeddings with --force."""
     settings = get_settings()
     configure_logging(settings.log_level)
     from mental_state_bot.ai.service import AIService
@@ -90,10 +90,12 @@ def embed_backfill(user_id: int, limit: int = 100) -> None:
             sessionmaker=sessionmaker,
             telegram_user_id=user_id,
             limit=limit,
+            force=force,
         )
     )
     asyncio.run(engine.dispose())
-    typer.echo(f"Backfilled embeddings for {processed} entries")
+    prefix = "Rebuilt embeddings for" if force else "Backfilled embeddings for"
+    typer.echo(f"{prefix} {processed} entries")
 
 
 @app.command("features-backfill")

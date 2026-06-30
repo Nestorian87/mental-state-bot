@@ -160,6 +160,7 @@ and daily summaries. The bot does not force a fixed reason category.
 - `mental-state-bot features-backfill <telegram-user-id> --limit 100` - generate missing AI feature analyses for old or incomplete entries.
 - `mental-state-bot features-backfill <telegram-user-id> --limit 100 --force` - re-run AI feature extraction for existing entries, useful after changing extraction prompts.
 - `mental-state-bot embed-backfill <telegram-user-id> --limit 100` - generate missing embeddings for old entries.
+- `mental-state-bot embed-backfill <telegram-user-id> --limit 100 --force` - rebuild entry embeddings after re-analysis or corrections.
 
 ## Data Ownership
 
