@@ -5,7 +5,79 @@ from uuid import uuid4
 
 import mental_state_bot.services.interactions as interactions_module
 from mental_state_bot.db.models import Snapshot
-from mental_state_bot.services.interactions import InteractionService
+from mental_state_bot.services.interactions import (
+    InteractionService,
+    _day_context,
+    _snapshot_conversation_context,
+)
+
+
+async def test_snapshot_conversation_context_includes_latest_prompt_and_entries(monkeypatch) -> None:
+    snapshot_id = uuid4()
+    snapshot = SimpleNamespace(id=snapshot_id, context_json={"intent": "state_and_activity"})
+    prompts = [
+        SimpleNamespace(
+            prompt_kind="initial",
+            text="Як просувається робота над альбомом?",
+            sent_at=None,
+        ),
+        SimpleNamespace(
+            prompt_kind="clarification",
+            text="Який трек мастериш?",
+            sent_at=None,
+        ),
+    ]
+    entries = [
+        SimpleNamespace(
+            created_at=None,
+            local_timestamp=None,
+            source="snapshot_response",
+            raw_text='"Море" прямо зараз',
+        )
+    ]
+
+    async def get_snapshot_prompts(session, *, snapshot_id):
+        return prompts
+
+    async def list_snapshot_entries(session, *, snapshot_id):
+        return entries
+
+    monkeypatch.setattr(interactions_module.repo, "get_snapshot_prompts", get_snapshot_prompts)
+    monkeypatch.setattr(interactions_module.repo, "list_snapshot_entries", list_snapshot_entries)
+
+    context = await _snapshot_conversation_context(object(), snapshot=snapshot)
+
+    assert context["latest_prompt"] == "Який трек мастериш?"
+    assert context["entries"][0]["raw_text"] == '"Море" прямо зараз'
+
+
+async def test_day_context_includes_all_day_entries(monkeypatch) -> None:
+    day = SimpleNamespace(id=uuid4())
+    entries = [
+        SimpleNamespace(created_at=None, local_timestamp=None, source="manual", raw_text="ранкова кава"),
+        SimpleNamespace(created_at=None, local_timestamp=None, source="snapshot_response", raw_text="мастеринг"),
+    ]
+
+    async def list_day_entries(session, *, day_id):
+        assert day_id == day.id
+        return entries
+
+    monkeypatch.setattr(interactions_module.repo, "list_day_entries", list_day_entries)
+
+    assert await _day_context(object(), day=day) == [
+        {
+            "created_at": None,
+            "local_timestamp": None,
+            "source": "manual",
+            "raw_text": "ранкова кава",
+        },
+        {
+            "created_at": None,
+            "local_timestamp": None,
+            "source": "snapshot_response",
+            "raw_text": "мастеринг",
+        },
+    ]
 
 
 async def test_record_missed_reason_resolves_prompt_and_closes_snapshot(monkeypatch) -> None:
@@ -109,3 +181,97 @@ async def test_record_missed_reason_without_open_prompt_is_only_a_reply(monkeypa
     assert result.entry_id is None
     assert result.should_embed_entry is False
     assert "Не бачу відкритого" in result.replies[0].text
+
+
+async def test_record_correction_returns_revised_summary_with_correction_keyboard(monkeypatch) -> None:
+    user_id = uuid4()
+    day_id = uuid4()
+    snapshot_id = uuid4()
+    target_id = uuid4()
+    correction_id = uuid4()
+    target = SimpleNamespace(
+        id=target_id,
+        snapshot_id=snapshot_id,
+        source="snapshot_response",
+        raw_text='"Море" прямо зараз',
+        created_at=None,
+        local_timestamp=None,
+    )
+    snapshot = SimpleNamespace(id=snapshot_id, context_json={"intent": "state_and_activity"})
+    user = SimpleNamespace(id=user_id, timezone="Europe/Kyiv")
+    calls = {"micro_context": None, "analyses": []}
+
+    class FakeSession:
+        async def get(self, model, item_id):
+            assert model is Snapshot
+            assert item_id == snapshot_id
+            return snapshot
+
+    class FakeAI:
+        async def generate_micro_summary(self, session, *, user_id, context):
+            calls["micro_context"] = context
+            return SimpleNamespace(text="Я почув, що “Море” — це назва треку, який ти мастериш."), None
+
+    async def get_or_create_day(session, *, user_id, local_date_value, started_at):
+        return SimpleNamespace(id=day_id)
+
+    async def get_recent_entries(session, *, user_id, limit):
+        return [target]
+
+    async def add_entry(session, **kwargs):
+        return SimpleNamespace(
+            id=correction_id,
+            source=kwargs["source"],
+            raw_text=kwargs["raw_text"],
+            created_at=None,
+            local_timestamp=kwargs["local_timestamp"],
+        )
+
+    async def get_user_settings(session, user_id):
+        return SimpleNamespace(
+            tone="calm",
+            humanity_level="balanced",
+            settings_json={},
+        )
+
+    async def list_day_entries(session, *, day_id):
+        return [target]
+
+    async def get_snapshot_prompts(session, *, snapshot_id):
+        return [
+            SimpleNamespace(
+                prompt_kind="clarification",
+                text="Який трек мастериш?",
+                sent_at=None,
+            )
+        ]
+
+    async def list_snapshot_entries(session, *, snapshot_id):
+        return [target]
+
+    async def add_ai_analysis(session, **kwargs):
+        calls["analyses"].append(kwargs)
+
+    monkeypatch.setattr(interactions_module.repo, "get_or_create_day", get_or_create_day)
+    monkeypatch.setattr(interactions_module.repo, "get_recent_entries", get_recent_entries)
+    monkeypatch.setattr(interactions_module.repo, "add_entry", add_entry)
+    monkeypatch.setattr(interactions_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(interactions_module.repo, "list_day_entries", list_day_entries)
+    monkeypatch.setattr(interactions_module.repo, "get_snapshot_prompts", get_snapshot_prompts)
+    monkeypatch.setattr(interactions_module.repo, "list_snapshot_entries", list_snapshot_entries)
+    monkeypatch.setattr(interactions_module.repo, "add_ai_analysis", add_ai_analysis)
+
+    service = InteractionService(SimpleNamespace(ai_provider="deepseek", ai_live_model="flash"), FakeAI())
+    result = await service.record_correction(
+        FakeSession(),
+        user=user,
+        correction_text='Ні, "Море" це назва треку',
+        telegram_message_id=10,
+        reply_to_message_id=None,
+    )
+
+    assert result.replies[-1].text == "Я почув, що “Море” — це назва треку, який ти мастериш."
+    assert result.replies[-1].keyboard == "correction"
+    assert calls["micro_context"]["latest_prompt"] == "Який трек мастериш?"
+    assert calls["micro_context"]["original_entry"]["raw_text"] == '"Море" прямо зараз'
+    assert calls["analyses"][0]["target_id"] == correction_id

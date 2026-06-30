@@ -321,6 +321,13 @@ async def list_day_entries(session: AsyncSession, *, day_id: uuid.UUID) -> Seque
     return result.scalars().all()
 
 
+async def list_snapshot_entries(session: AsyncSession, *, snapshot_id: uuid.UUID) -> Sequence[Entry]:
+    result = await session.execute(
+        select(Entry).where(Entry.snapshot_id == snapshot_id).order_by(Entry.created_at)
+    )
+    return result.scalars().all()
+
+
 async def count_user_rows(session: AsyncSession, model, *, user_id: uuid.UUID) -> int:
     result = await session.execute(select(func.count(model.id)).where(model.user_id == user_id))
     return int(result.scalar_one() or 0)

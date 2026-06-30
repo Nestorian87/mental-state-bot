@@ -61,10 +61,16 @@ class InteractionService:
                 reply_to_message_id=reply_to_message_id,
                 source="manual",
             )
+            day_context = await _day_context(session, day=day)
             micro_summary, _ = await self.ai.generate_micro_summary(
                 session,
                 user_id=user.id,
-                context={"raw_text": text, "source": "manual", "style": style_context},
+                context={
+                    "raw_text": text,
+                    "source": "manual",
+                    "style": style_context,
+                    "day_context": day_context,
+                },
             )
             await self._store_micro_summary(session, user=user, entry=entry, micro_summary=micro_summary.text)
             return InteractionResult(
@@ -88,6 +94,8 @@ class InteractionService:
 
         if await self._should_clarify(session, snapshot=open_snapshot, text=text, entry=entry):
             recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=5)
+            snapshot_conversation = await _snapshot_conversation_context(session, snapshot=open_snapshot)
+            day_context = await _day_context(session, day=day)
             clarification, model_run_id = await self.ai.generate_clarification(
                 session,
                 user_id=user.id,
@@ -95,6 +103,9 @@ class InteractionService:
                     "current_answer": text,
                     "recent_entries": [_entry_context(item) for item in recent_entries],
                     "snapshot": open_snapshot.context_json,
+                    "snapshot_conversation": snapshot_conversation,
+                    "latest_prompt": snapshot_conversation.get("latest_prompt"),
+                    "day_context": day_context,
                     "style": style_context,
                 },
             )
@@ -115,12 +126,17 @@ class InteractionService:
                 should_embed_entry=False,
             )
 
+        snapshot_conversation = await _snapshot_conversation_context(session, snapshot=open_snapshot)
+        day_context = await _day_context(session, day=day)
         micro_summary, _ = await self.ai.generate_micro_summary(
             session,
             user_id=user.id,
             context={
                 "raw_text": text,
                 "snapshot_context": open_snapshot.context_json,
+                "snapshot_conversation": snapshot_conversation,
+                "latest_prompt": snapshot_conversation.get("latest_prompt"),
+                "day_context": day_context,
                 "source": "snapshot_response",
                 "style": style_context,
             },
@@ -217,8 +233,36 @@ class InteractionService:
             },
         )
         target_note = "останнього запису" if target else "контексту"
+        user_settings = await repo.get_user_settings(session, user.id)
+        style_context = _style_context(user_settings)
+        day_context = await _day_context(session, day=day)
+        snapshot = await session.get(Snapshot, target.snapshot_id) if target and target.snapshot_id else None
+        snapshot_conversation = (
+            await _snapshot_conversation_context(session, snapshot=snapshot)
+            if snapshot is not None
+            else None
+        )
+        micro_summary, _ = await self.ai.generate_micro_summary(
+            session,
+            user_id=user.id,
+            context={
+                "raw_text": correction_text,
+                "source": "correction",
+                "correction_text": correction_text,
+                "original_entry": _entry_context(target) if target else None,
+                "snapshot_context": snapshot.context_json if snapshot else None,
+                "snapshot_conversation": snapshot_conversation,
+                "latest_prompt": snapshot_conversation.get("latest_prompt") if snapshot_conversation else None,
+                "day_context": day_context,
+                "style": style_context,
+            },
+        )
+        await self._store_micro_summary(session, user=user, entry=entry, micro_summary=micro_summary.text)
         return InteractionResult(
-            replies=[BotReply(f"Записав виправлення для {target_note}. Я враховуватиму це далі.")],
+            replies=[
+                BotReply(f"Записав виправлення для {target_note}."),
+                BotReply(micro_summary.text, keyboard="correction"),
+            ],
             entry_id=entry.id,
             snapshot_closed=True,
             should_embed_entry=True,
@@ -304,7 +348,16 @@ class InteractionService:
             ai_service=self.ai,
             user_id=user.id,
             entry=entry,
-            extra_context={"snapshot_context": snapshot.context_json if snapshot else None, "backfill": False},
+            extra_context={
+                "snapshot_context": snapshot.context_json if snapshot else None,
+                "snapshot_conversation": (
+                    await _snapshot_conversation_context(session, snapshot=snapshot)
+                    if snapshot
+                    else None
+                ),
+                "day_context": await _day_context(session, day=day),
+                "backfill": False,
+            },
         )
         return entry
 
@@ -363,8 +416,44 @@ class InteractionService:
 def _entry_context(entry: Entry) -> dict[str, Any]:
     return {
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        "local_timestamp": entry.local_timestamp.isoformat() if entry.local_timestamp else None,
         "source": entry.source,
         "raw_text": entry.raw_text,
+    }
+
+
+async def _day_context(session: AsyncSession, *, day: Day) -> list[dict[str, Any]]:
+    entries = await repo.list_day_entries(session, day_id=day.id)
+    return [_entry_context(entry) for entry in entries]
+
+
+async def _snapshot_conversation_context(
+    session: AsyncSession, *, snapshot: Snapshot
+) -> dict[str, Any]:
+    prompts = await repo.get_snapshot_prompts(session, snapshot_id=snapshot.id)
+    entries = await repo.list_snapshot_entries(session, snapshot_id=snapshot.id)
+    prompt_context = [
+        {
+            "role": "bot",
+            "kind": prompt.prompt_kind,
+            "text": prompt.text,
+            "sent_at": prompt.sent_at.isoformat() if prompt.sent_at else None,
+        }
+        for prompt in prompts
+    ]
+    entry_context = [
+        {
+            "role": "user",
+            **_entry_context(entry),
+        }
+        for entry in entries
+    ]
+    return {
+        "snapshot_id": str(snapshot.id),
+        "initial_context": snapshot.context_json,
+        "latest_prompt": prompt_context[-1]["text"] if prompt_context else None,
+        "prompts": prompt_context,
+        "entries": entry_context,
     }
 
 

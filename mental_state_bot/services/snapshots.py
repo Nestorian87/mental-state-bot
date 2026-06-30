@@ -109,8 +109,10 @@ async def send_snapshot_prompt(
         started_at=now,
     )
     recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=6)
+    day_entries = await repo.list_day_entries(session, day_id=day.id)
     context = snapshot_question_context(
         recent_entries=recent_entries,
+        day_entries=day_entries,
         user_settings=user_settings,
         trigger="manual" if scheduled_for is None else "scheduled",
         photo_prompt_opportunity=random.random() < photo_prompt_chance,
@@ -159,6 +161,7 @@ async def _close_if_snapshot_day_is_closed(session: AsyncSession, snapshot: Snap
 def snapshot_question_context(
     *,
     recent_entries,
+    day_entries=None,
     user_settings: UserSettings,
     trigger: str,
     photo_prompt_opportunity: bool = False,
@@ -173,13 +176,10 @@ def snapshot_question_context(
         )
     return {
         "recent_entries": [
-            {
-                "created_at": entry.created_at.isoformat() if entry.created_at else None,
-                "source": entry.source,
-                "raw_text": entry.raw_text,
-            }
+            _entry_context(entry)
             for entry in recent_entries
         ],
+        "day_context": [_entry_context(entry) for entry in (day_entries or [])],
         "style": {
             "tone": user_settings.tone,
             "humanity_level": user_settings.humanity_level,
@@ -198,6 +198,15 @@ def snapshot_question_context(
             ),
         },
         "trigger": trigger,
+    }
+
+
+def _entry_context(entry) -> dict[str, Any]:
+    return {
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        "local_timestamp": entry.local_timestamp.isoformat() if getattr(entry, "local_timestamp", None) else None,
+        "source": entry.source,
+        "raw_text": entry.raw_text,
     }
 
 
