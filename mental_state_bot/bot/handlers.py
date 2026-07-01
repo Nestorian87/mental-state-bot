@@ -5,6 +5,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from mental_state_bot.ai.service import AIService
 from mental_state_bot.bot.keyboards import (
     correction_keyboard,
+    day_detail_keyboard,
     main_reply_keyboard,
     settings_keyboard,
     sleep_confirmation_keyboard,
@@ -26,7 +28,7 @@ from mental_state_bot.bot.keyboards import (
 )
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
-from mental_state_bot.db.models import UserSettings
+from mental_state_bot.db.models import Day, User, UserSettings
 from mental_state_bot.services.archive_audit import build_archive_audit, format_archive_audit
 from mental_state_bot.services.exports import export_user_archive
 from mental_state_bot.services.interactions import BotReply, InteractionResult, InteractionService
@@ -48,24 +50,34 @@ from mental_state_bot.services.preferences import (
 from mental_state_bot.services.review import (
     PhotoMoment,
     build_metrics_chart_png,
+    build_metrics_chart_png_for_day,
     format_cost_report,
+    format_day_summary_section,
+    format_day_view,
+    format_gaps_for_day,
     format_gaps_view,
     format_latest_summary_section,
+    format_metrics_for_day,
     format_metrics_view,
     format_period_summary,
     format_photo_moments_view,
+    format_raw_entries_for_day,
     format_raw_entries_view,
     format_similar_entries,
+    format_summary_section,
     format_today_view,
+    get_photo_moments_for_day,
     get_today_photo_moments,
 )
 from mental_state_bot.services.snapshots import send_snapshot_prompt
 from mental_state_bot.services.summaries import SummaryService
+from mental_state_bot.time_utils import zoneinfo
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 SLEEP_MARKER_TEXT = "лягаю спати"
+_DAY_DETAIL_SECTIONS = {"timeline", "metrics", "photos", "raw", "gaps"}
 
 
 @dataclass(frozen=True)
@@ -173,6 +185,30 @@ async def today_button_handler(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     await today_command_handler(message, settings, sessionmaker)
+
+
+@router.message(Command("day"))
+async def day_command_handler(
+    message: Message,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    if not await _allowed(message, settings):
+        return
+    query = _command_argument(message.text or "")
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_message_user(session, message, settings)
+        target_date = _parse_day_query(query, user.timezone)
+        if target_date is None:
+            await message.answer("Формат: /day 2026-06-30. Також можна: /day вчора або /day сьогодні.")
+            return
+        day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=target_date)
+        if day is None:
+            await message.answer(f"За {target_date.isoformat()} ще немає збереженого дня.")
+            return
+        day_id = str(day.id)
+        text = await format_day_view(session, user=user, day=day, limit=30)
+    await _answer_long_text(message, text, reply_markup=day_detail_keyboard(day_id=day_id))
 
 
 @router.message(Command("costs"))
@@ -683,7 +719,7 @@ async def summary_command_handler(
         user = await _get_or_create_message_user(session, message, settings)
         async with _typing(message):
             summary = await summary_service.generate_today_summary(session, user=user)
-    await message.answer(summary.short_text, reply_markup=summary_detail_keyboard())
+    await message.answer(summary.short_text, reply_markup=summary_detail_keyboard(summary_id=str(summary.id)))
 
 
 @router.message(Command("sleep"))
@@ -811,6 +847,45 @@ async def gaps_callback_handler(
     await _answer_long_text(callback.message, text)
 
 
+@router.callback_query(F.data.startswith("dayview:"))
+async def day_detail_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    parsed = _parse_scoped_callback(callback.data or "", prefix="dayview")
+    if parsed is None:
+        await callback.answer("Не можу відкрити цей день")
+        return
+    day_id, section = parsed
+    chart = None
+    moments: list[PhotoMoment] = []
+    reply_day_id = None
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        day = await repo.get_day(session, day_id=day_id)
+        if day is None or day.user_id != user.id:
+            text = "Не знайшов цей день в архіві."
+        else:
+            reply_day_id = str(day.id)
+            text, chart, moments = await _format_day_detail_section(session, user=user, day=day, section=section)
+    await callback.answer()
+    await _answer_long_text(
+        callback.message,
+        text,
+        reply_markup=day_detail_keyboard(day_id=reply_day_id) if reply_day_id else None,
+    )
+    if chart is not None:
+        await callback.message.answer_photo(
+            BufferedInputFile(chart, filename="metrics.png"),
+            caption="Графік: синя лінія — настрій, зелена — енергія.",
+        )
+    if moments:
+        await _send_photo_moments(callback.message, moments)
+
+
 @router.callback_query(F.data.startswith("summary:"))
 async def summary_detail_callback_handler(
     callback: CallbackQuery,
@@ -819,25 +894,59 @@ async def summary_detail_callback_handler(
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
-    section = callback.data.split(":", maxsplit=1)[1]
+    parts = (callback.data or "").split(":")
+    section = parts[-1] if len(parts) >= 2 else "story"
     chart = None
-    moments = []
+    moments: list[PhotoMoment] = []
+    reply_markup = None
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
-        if section == "raw":
-            text = await format_raw_entries_view(session, user=user)
-        elif section == "timeline":
-            text = await format_today_view(session, user=user, limit=30)
-        elif section == "metrics":
-            text = await format_metrics_view(session, user=user)
-            chart = await build_metrics_chart_png(session, user=user)
-        elif section == "photos":
-            moments = await get_today_photo_moments(session, user=user)
-            text = format_photo_moments_view(moments, timezone=user.timezone)
+        summary = None
+        if len(parts) == 3:
+            summary_id = _uuid_or_none(parts[1])
+            summary = await repo.get_summary(session, summary_id=summary_id) if summary_id else None
+            if summary is None or summary.user_id != user.id:
+                text = "Не знайшов цей підсумок."
+            else:
+                reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
+                day = await repo.get_day(session, day_id=summary.day_id) if summary.day_id else None
+                if day is not None and day.user_id == user.id and section in _DAY_DETAIL_SECTIONS:
+                    text, chart, moments = await _format_day_detail_section(
+                        session,
+                        user=user,
+                        day=day,
+                        section=section,
+                    )
+                else:
+                    text = format_summary_section(summary, section)
         else:
-            text = await format_latest_summary_section(session, user=user, section=section)
+            summary = await repo.get_latest_summary(session, user_id=user.id, period_type="daily")
+            if summary is not None:
+                reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
+                day = await repo.get_day(session, day_id=summary.day_id) if summary.day_id else None
+                if day is not None and day.user_id == user.id and section in _DAY_DETAIL_SECTIONS:
+                    text, chart, moments = await _format_day_detail_section(
+                        session,
+                        user=user,
+                        day=day,
+                        section=section,
+                    )
+                else:
+                    text = format_summary_section(summary, section)
+            elif section == "raw":
+                text = await format_raw_entries_view(session, user=user)
+            elif section == "timeline":
+                text = await format_today_view(session, user=user, limit=30)
+            elif section == "metrics":
+                text = await format_metrics_view(session, user=user)
+                chart = await build_metrics_chart_png(session, user=user)
+            elif section == "photos":
+                moments = await get_today_photo_moments(session, user=user)
+                text = format_photo_moments_view(moments, timezone=user.timezone)
+            else:
+                text = await format_latest_summary_section(session, user=user, section=section)
     await callback.answer()
-    await _answer_long_text(callback.message, text, reply_markup=summary_detail_keyboard())
+    await _answer_long_text(callback.message, text, reply_markup=reply_markup)
     if chart is not None:
         await callback.message.answer_photo(
             BufferedInputFile(chart, filename="metrics.png"),
@@ -1310,7 +1419,7 @@ async def sleep_callback_handler(
         async with _typing(callback.message):
             summary = await summary_service.close_today_with_summary(session, user=user)
     await callback.answer("День закрито")
-    await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard())
+    await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard(summary_id=str(summary.id)))
 
 
 @router.callback_query(F.data == "sleep:cancel")
@@ -1336,7 +1445,7 @@ async def day_summary_callback_handler(
         async with _typing(callback.message):
             summary = await summary_service.generate_today_summary(session, user=user)
     await callback.answer()
-    await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard())
+    await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard(summary_id=str(summary.id)))
 
 
 @router.callback_query(F.data.startswith("archive:export"))
@@ -1875,6 +1984,78 @@ def _is_sleep_marker_text(text: str) -> bool:
     return normalized == SLEEP_MARKER_TEXT
 
 
+async def _format_day_detail_section(
+    session: AsyncSession, *, user: User, day: Day, section: str
+) -> tuple[str, bytes | None, list[PhotoMoment]]:
+    chart = None
+    moments: list[PhotoMoment] = []
+    day_title = day.local_date.isoformat()
+    if section == "raw":
+        text = await format_raw_entries_for_day(session, user=user, day=day, title=day_title)
+    elif section == "timeline":
+        text = await format_day_view(session, user=user, day=day, limit=30)
+    elif section == "metrics":
+        text = await format_metrics_for_day(session, user=user, day=day, title=day_title)
+        chart = await build_metrics_chart_png_for_day(session, user=user, day=day)
+    elif section == "photos":
+        moments = await get_photo_moments_for_day(session, day=day)
+        text = format_photo_moments_view(
+            moments,
+            timezone=user.timezone,
+            title=f"Фото за {day_title}",
+        )
+    elif section == "gaps":
+        text = await format_gaps_for_day(
+            session,
+            user=user,
+            day=day,
+            target_date=day.local_date,
+            title=f"Прогалини за {day_title}",
+        )
+    else:
+        text = await format_day_summary_section(session, user=user, day=day, section=section)
+    return text, chart, moments
+
+
+def _parse_day_query(query: str, timezone: str) -> date | None:
+    normalized = " ".join(query.strip().lower().split())
+    if not normalized:
+        return None
+    if normalized in {"сьогодні", "today"}:
+        return datetime.now(tz=zoneinfo(timezone)).date()
+    if normalized in {"вчора", "yesterday"}:
+        return datetime.now(tz=zoneinfo(timezone)).date() - timedelta(days=1)
+    try:
+        return date.fromisoformat(normalized)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(normalized, "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+
+def _parse_scoped_callback(data: str, *, prefix: str) -> tuple[UUID, str] | None:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != prefix:
+        return None
+    item_id = _uuid_or_none(parts[1])
+    if item_id is None or not parts[2]:
+        return None
+    return item_id, parts[2]
+
+
+def _uuid_or_none(value: str | UUID | None) -> UUID | None:
+    if isinstance(value, UUID):
+        return value
+    if value is None:
+        return None
+    try:
+        return UUID(str(value))
+    except ValueError:
+        return None
+
+
 def _missed_reason_text(text: str) -> str | None:
     normalized = text.strip()
     lowered = normalized.lower()
@@ -1891,6 +2072,7 @@ def _help_text() -> str:
             "Команди:",
             "/snapshot - зробити зріз зараз",
             "/today - таймлайн сьогодні",
+            "/day 2026-06-30 - переглянути будь-який день",
             "/metrics - метрики й міні-графіки",
             "/gaps - прогалини й покриття дня",
             "/raw - сирі записи за день",

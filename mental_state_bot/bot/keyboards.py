@@ -92,18 +92,40 @@ def missed_prompt_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def summary_detail_keyboard() -> InlineKeyboardMarkup:
+def summary_detail_keyboard(*, summary_id: str | None = None) -> InlineKeyboardMarkup:
+    prefix = f"summary:{summary_id}" if summary_id else "summary"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Історія", callback_data="summary:story"),
-                InlineKeyboardButton(text="Таймлайн", callback_data="summary:timeline"),
+                InlineKeyboardButton(text="Історія", callback_data=f"{prefix}:story"),
+                InlineKeyboardButton(text="Таймлайн", callback_data=f"{prefix}:timeline"),
             ],
             [
-                InlineKeyboardButton(text="Метрики", callback_data="summary:metrics"),
-                InlineKeyboardButton(text="Фото дня", callback_data="summary:photos"),
+                InlineKeyboardButton(text="Метрики", callback_data=f"{prefix}:metrics"),
+                InlineKeyboardButton(text="Фото дня", callback_data=f"{prefix}:photos"),
             ],
-            [InlineKeyboardButton(text="Сирі записи", callback_data="summary:raw")],
+            [InlineKeyboardButton(text="Сирі записи", callback_data=f"{prefix}:raw")],
+            [InlineKeyboardButton(text="Головне меню", callback_data="nav:home")],
+        ]
+    )
+
+
+def day_detail_keyboard(*, day_id: str) -> InlineKeyboardMarkup:
+    prefix = f"dayview:{day_id}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Історія", callback_data=f"{prefix}:story"),
+                InlineKeyboardButton(text="Таймлайн", callback_data=f"{prefix}:timeline"),
+            ],
+            [
+                InlineKeyboardButton(text="Метрики", callback_data=f"{prefix}:metrics"),
+                InlineKeyboardButton(text="Фото дня", callback_data=f"{prefix}:photos"),
+            ],
+            [
+                InlineKeyboardButton(text="Прогалини", callback_data=f"{prefix}:gaps"),
+                InlineKeyboardButton(text="Сирі записи", callback_data=f"{prefix}:raw"),
+            ],
             [InlineKeyboardButton(text="Головне меню", callback_data="nav:home")],
         ]
     )

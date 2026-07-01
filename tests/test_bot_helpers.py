@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -13,6 +14,7 @@ from mental_state_bot.bot.handlers import (
     _help_text,
     _is_sleep_marker_text,
     _missed_reason_text,
+    _parse_day_query,
     _pending_voice_note_payload,
     _split_telegram_text,
     _valid_hhmm,
@@ -20,8 +22,10 @@ from mental_state_bot.bot.handlers import (
     _voice_transcription_preview,
 )
 from mental_state_bot.bot.keyboards import (
+    day_detail_keyboard,
     main_reply_keyboard,
     missed_prompt_keyboard,
+    summary_detail_keyboard,
     voice_transcription_keyboard,
 )
 from mental_state_bot.services.preferences import (
@@ -72,6 +76,7 @@ def test_help_text_mentions_core_commands() -> None:
 
     assert "/snapshot" in text
     assert "/summary" in text
+    assert "/day 2026-06-30" in text
     assert "/sleep" in text
     assert "/export" in text
     assert "/export_csv" in text
@@ -101,6 +106,42 @@ def test_voice_transcription_keyboard_exposes_confirm_fix_cancel() -> None:
     }
 
     assert callbacks == {"voice:confirm", "voice:fix", "voice:cancel"}
+
+
+def test_day_query_parses_explicit_dates() -> None:
+    assert _parse_day_query("2026-06-30", "Europe/Kyiv") == date(2026, 6, 30)
+    assert _parse_day_query("30.06.2026", "Europe/Kyiv") == date(2026, 6, 30)
+    assert _parse_day_query("", "Europe/Kyiv") is None
+    assert _parse_day_query("колись", "Europe/Kyiv") is None
+
+
+def test_summary_detail_keyboard_scopes_callbacks_to_summary() -> None:
+    summary_id = str(uuid4())
+    keyboard = summary_detail_keyboard(summary_id=summary_id)
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert f"summary:{summary_id}:story" in callbacks
+    assert f"summary:{summary_id}:timeline" in callbacks
+    assert "summary:timeline" not in callbacks
+
+
+def test_day_detail_keyboard_scopes_callbacks_to_day() -> None:
+    day_id = str(uuid4())
+    keyboard = day_detail_keyboard(day_id=day_id)
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert f"dayview:{day_id}:story" in callbacks
+    assert f"dayview:{day_id}:gaps" in callbacks
 
 
 def test_pending_voice_note_payload_roundtrip_keeps_original_transcript() -> None:

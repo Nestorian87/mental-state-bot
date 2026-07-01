@@ -119,7 +119,7 @@ async def morning_summary_tick(
                 await bot.send_message(
                     chat_id=user.chat_id,
                     text="Ранковий підсумок за вчора:\n\n" + summary.short_text,
-                    reply_markup=summary_detail_keyboard(),
+                    reply_markup=summary_detail_keyboard(summary_id=str(summary.id)),
                 )
 
 

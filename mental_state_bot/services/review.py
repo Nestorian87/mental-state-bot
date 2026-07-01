@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import (
+    Day,
     EmbeddingRecord,
     Entry,
     Media,
@@ -33,10 +34,16 @@ async def format_today_view(session: AsyncSession, *, user: User, limit: int = 1
     day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
     if day is None:
         return "За сьогодні ще немає записів."
+    return await format_day_view(session, user=user, day=day, limit=limit, title="Сьогодні")
 
+
+async def format_day_view(
+    session: AsyncSession, *, user: User, day: Day, limit: int = 18, title: str | None = None
+) -> str:
     entries = list(await repo.list_day_entries(session, day_id=day.id))
+    day_title = title or f"День {day.local_date.isoformat()}"
     if not entries:
-        return "За сьогодні ще немає записів."
+        return f"{day_title}: ще немає записів."
 
     visible_entries = entries[-limit:]
     analyses = await repo.list_analyses_for_targets(
@@ -53,7 +60,7 @@ async def format_today_view(session: AsyncSession, *, user: User, limit: int = 1
         labels_by_entry[entry_id].extend(result.get("state_labels") or [])
 
     lines = [
-        f"Сьогодні: {_entry_count_text(len(entries))}.",
+        f"{day_title}: {_entry_count_text(len(entries))}.",
         "",
     ]
     if len(entries) > limit:
@@ -72,12 +79,19 @@ async def format_raw_entries_view(session: AsyncSession, *, user: User, limit: i
     day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
     if day is None:
         return "За сьогодні ще немає сирих записів."
+    return await format_raw_entries_for_day(session, user=user, day=day, limit=limit, title="сьогодні")
+
+
+async def format_raw_entries_for_day(
+    session: AsyncSession, *, user: User, day: Day, limit: int = 30, title: str | None = None
+) -> str:
     entries = list(await repo.list_day_entries(session, day_id=day.id))
+    day_title = title or day.local_date.isoformat()
     if not entries:
-        return "За сьогодні ще немає сирих записів."
+        return f"За {day_title} ще немає сирих записів."
 
     visible_entries = entries[-limit:]
-    lines = [f"Сирі записи за сьогодні: {_entry_count_text(len(entries))}", ""]
+    lines = [f"Сирі записи за {day_title}: {_entry_count_text(len(entries))}", ""]
     if len(entries) > limit:
         lines.append(f"Показую останні {limit}.")
     for entry in visible_entries:
@@ -90,9 +104,16 @@ async def format_metrics_view(session: AsyncSession, *, user: User) -> str:
     day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
     if day is None:
         return "За сьогодні ще немає метрик."
+    return await format_metrics_for_day(session, user=user, day=day, title="сьогодні")
+
+
+async def format_metrics_for_day(
+    session: AsyncSession, *, user: User, day: Day, title: str | None = None
+) -> str:
     entries = _metric_entries(list(await repo.list_day_entries(session, day_id=day.id)))
+    day_title = title or day.local_date.isoformat()
     if not entries:
-        return "За сьогодні ще немає метрик."
+        return f"За {day_title} ще немає метрик."
 
     analyses = await repo.list_analyses_for_targets(
         session,
@@ -136,7 +157,7 @@ async def format_metrics_view(session: AsyncSession, *, user: User) -> str:
         )
 
     lines = [
-        f"Метрики за сьогодні: {_entry_count_text(len(entries))}.",
+        f"Метрики за {day_title}: {_entry_count_text(len(entries))}.",
         f"Приємні/живі моменти, знайдені AI: {pleasant_count}",
         "",
         "Настрій:",
@@ -162,6 +183,10 @@ async def build_metrics_chart_png(session: AsyncSession, *, user: User) -> bytes
     day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
     if day is None:
         return None
+    return await build_metrics_chart_png_for_day(session, user=user, day=day)
+
+
+async def build_metrics_chart_png_for_day(session: AsyncSession, *, user: User, day: Day) -> bytes | None:
     entries = _metric_entries(list(await repo.list_day_entries(session, day_id=day.id)))
     if not entries:
         return None
@@ -184,18 +209,28 @@ async def get_today_photo_moments(session: AsyncSession, *, user: User) -> list[
     day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
     if day is None:
         return []
+    return await get_photo_moments_for_day(session, day=day)
+
+
+async def get_photo_moments_for_day(session: AsyncSession, *, day: Day) -> list[PhotoMoment]:
     rows = await repo.list_day_media_with_entries(session, day_id=day.id, media_type="photo")
     return [PhotoMoment(media=media, entry=entry) for media, entry in rows]
 
 
 def format_photo_moments_view(
-    moments: list[PhotoMoment], *, limit: int = 12, timezone: str | None = None
+    moments: list[PhotoMoment],
+    *,
+    limit: int = 12,
+    timezone: str | None = None,
+    title: str = "Фото дня",
 ) -> str:
     if not moments:
-        return "За сьогодні ще немає фото."
+        if title == "Фото дня":
+            return "За сьогодні ще немає фото."
+        return f"{title}: немає фото."
 
     visible = moments[-limit:]
-    lines = [f"Фото дня: {len(moments)}", ""]
+    lines = [f"{title}: {len(moments)}", ""]
     if len(moments) > limit:
         lines.append(f"Показую останні {limit}.")
         lines.append("")
@@ -215,10 +250,22 @@ def format_photo_moments_view(
 async def format_gaps_view(session: AsyncSession, *, user: User) -> str:
     today = local_date(user.timezone)
     day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=today)
+    return await format_gaps_for_day(session, user=user, day=day, target_date=today, title="Прогалини сьогодні")
+
+
+async def format_gaps_for_day(
+    session: AsyncSession,
+    *,
+    user: User,
+    day: Day | None,
+    target_date: date | None = None,
+    title: str | None = None,
+) -> str:
+    report_date = target_date or (day.local_date if day else local_date(user.timezone))
     user_settings = await repo.get_user_settings(session, user.id)
-    window_start, window_end = _active_window(today, user.timezone, user_settings)
+    window_start, window_end = _active_window(report_date, user.timezone, user_settings)
     now_local = utc_now().astimezone(zoneinfo(user.timezone))
-    coverage_end = min(now_local, window_end)
+    coverage_end = min(now_local, window_end) if report_date == local_date(user.timezone) else window_end
 
     entries = list(await repo.list_day_entries(session, day_id=day.id)) if day else []
     missed_prompts = list(
@@ -234,6 +281,7 @@ async def format_gaps_view(session: AsyncSession, *, user: User) -> str:
         missed_prompts=missed_prompts,
         window_start=window_start,
         window_end=coverage_end,
+        title=title or f"Прогалини за {report_date.isoformat()}",
     )
 
 
@@ -243,11 +291,12 @@ def format_gap_report(
     missed_prompts: list[MissedPrompt],
     window_start: datetime,
     window_end: datetime,
+    title: str = "Прогалини сьогодні",
 ) -> str:
     if window_end <= window_start:
         return "\n".join(
             [
-                "Прогалини сьогодні",
+                title,
                 f"Активне вікно починається о {window_start.strftime('%H:%M')}.",
                 "Поки рано оцінювати покриття дня.",
             ]
@@ -264,7 +313,7 @@ def format_gap_report(
     coverage_note = _coverage_note(len(entry_times), len(missed_prompts), largest_gap)
 
     lines = [
-        "Прогалини сьогодні",
+        title,
         f"Активне вікно у звіті: {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')}",
         f"Записів у вікні: {len(entry_times)}",
         f"Пропущених/нагаданих зрізів: {len(missed_prompts)}",
@@ -304,6 +353,13 @@ async def format_latest_summary_section(
     summary = await repo.get_latest_summary(session, user_id=user.id, period_type="daily")
     if summary is None:
         return "Ще немає згенерованого денного підсумку. Можна натиснути “Підсумок дня”."
+    return format_summary_section(summary, section)
+
+
+async def format_day_summary_section(session: AsyncSession, *, user: User, day: Day, section: str) -> str:
+    summary = await repo.get_day_summary(session, user_id=user.id, day_id=day.id, period_type="daily")
+    if summary is None:
+        return f"Підсумку за {day.local_date.isoformat()} ще немає."
     return format_summary_section(summary, section)
 
 

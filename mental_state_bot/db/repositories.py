@@ -134,6 +134,10 @@ async def get_day_by_date(
     return result.scalar_one_or_none()
 
 
+async def get_day(session: AsyncSession, *, day_id: uuid.UUID) -> Day | None:
+    return await session.get(Day, day_id)
+
+
 async def close_day(
     session: AsyncSession,
     *,
@@ -791,6 +795,22 @@ async def get_latest_summary(
     result = await session.execute(
         select(Summary)
         .where(Summary.user_id == user_id, Summary.period_type == period_type)
+        .order_by(desc(Summary.created_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_summary(session: AsyncSession, *, summary_id: uuid.UUID) -> Summary | None:
+    return await session.get(Summary, summary_id)
+
+
+async def get_day_summary(
+    session: AsyncSession, *, user_id: uuid.UUID, day_id: uuid.UUID, period_type: str = "daily"
+) -> Summary | None:
+    result = await session.execute(
+        select(Summary)
+        .where(Summary.user_id == user_id, Summary.day_id == day_id, Summary.period_type == period_type)
         .order_by(desc(Summary.created_at))
         .limit(1)
     )
