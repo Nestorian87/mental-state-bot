@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from mental_state_bot.bot.handlers import (
+    MANUAL_ENTRY_ACTIONS,
+    VOICE_TRANSCRIPTION_ACTIONS,
     VoiceNoteTranscription,
     _archive_export_options,
     _command_argument,
@@ -133,6 +135,7 @@ def test_voice_transcription_keyboard_exposes_confirm_fix_cancel() -> None:
     }
 
     assert callbacks == {"voice:confirm", "voice:fix", "voice:cancel"}
+    assert {callback.split(":", maxsplit=1)[1] for callback in callbacks} == VOICE_TRANSCRIPTION_ACTIONS
 
 
 def test_manual_entry_confirmation_keyboard_exposes_save_and_ignore() -> None:
@@ -145,6 +148,7 @@ def test_manual_entry_confirmation_keyboard_exposes_save_and_ignore() -> None:
     }
 
     assert callbacks == {"manual:save", "manual:ignore"}
+    assert {callback.split(":", maxsplit=1)[1] for callback in callbacks} == MANUAL_ENTRY_ACTIONS
 
 
 def test_day_query_parses_explicit_dates() -> None:

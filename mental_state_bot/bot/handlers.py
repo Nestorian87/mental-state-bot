@@ -98,6 +98,8 @@ from mental_state_bot.time_utils import local_date, zoneinfo
 logger = logging.getLogger(__name__)
 
 FEATURE_REANALYSIS_LIMIT = 200
+VOICE_TRANSCRIPTION_ACTIONS = {"confirm", "fix", "cancel"}
+MANUAL_ENTRY_ACTIONS = {"save", "ignore"}
 router = Router()
 
 SLEEP_MARKER_TEXT = "лягаю спати"
@@ -1482,7 +1484,7 @@ async def voice_transcription_callback_handler(
     if not await _allowed_callback(callback, settings):
         return
     action = (callback.data or "").split(":", maxsplit=1)[1]
-    if action not in {"save", "ignore"}:
+    if action not in VOICE_TRANSCRIPTION_ACTIONS:
         await callback.answer("Не впізнав дію", show_alert=True)
         return
     entry_id: UUID | None = None
@@ -1552,6 +1554,9 @@ async def manual_entry_callback_handler(
     if not await _allowed_callback(callback, settings):
         return
     action = (callback.data or "").split(":", maxsplit=1)[1]
+    if action not in MANUAL_ENTRY_ACTIONS:
+        await callback.answer("Не впізнав дію", show_alert=True)
+        return
     entry_id: UUID | None = None
     should_embed = False
     replies: list[BotReply] = []
