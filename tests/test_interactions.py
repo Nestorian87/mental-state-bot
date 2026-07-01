@@ -8,6 +8,7 @@ from mental_state_bot.db.models import Snapshot
 from mental_state_bot.services.interactions import (
     InteractionService,
     _day_context,
+    _latest_content_entry,
     _missing_core_metrics,
     _snapshot_conversation_context,
 )
@@ -261,6 +262,78 @@ async def test_record_missed_reason_without_open_prompt_is_only_a_reply(monkeypa
     assert result.entry_id is None
     assert result.should_embed_entry is False
     assert "Не бачу відкритого" in result.replies[0].text
+
+
+def test_latest_content_entry_ignores_button_entries() -> None:
+    content = SimpleNamespace(source="snapshot_response")
+    button = SimpleNamespace(source="button_later")
+
+    assert _latest_content_entry([content, button]) is content
+
+
+async def test_record_button_action_does_not_create_entry_for_later(monkeypatch) -> None:
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
+    snapshot = SimpleNamespace(id=uuid4())
+    calls = {"closed": []}
+
+    async def get_open_snapshot(session, *, user_id):
+        assert user_id == user.id
+        return snapshot
+
+    async def list_snapshot_entries(session, *, snapshot_id):
+        assert snapshot_id == snapshot.id
+        return []
+
+    async def close_snapshot(session, *, snapshot_id, status="closed"):
+        calls["closed"].append({"snapshot_id": snapshot_id, "status": status})
+
+    async def add_entry(session, **kwargs):
+        raise AssertionError("button controls must not create diary entries")
+
+    monkeypatch.setattr(interactions_module.repo, "get_open_snapshot", get_open_snapshot)
+    monkeypatch.setattr(interactions_module.repo, "list_snapshot_entries", list_snapshot_entries)
+    monkeypatch.setattr(interactions_module.repo, "close_snapshot", close_snapshot)
+    monkeypatch.setattr(interactions_module.repo, "add_entry", add_entry)
+
+    service = InteractionService(SimpleNamespace(), None)
+    result = await service.record_button_action(object(), user=user, action="later")
+
+    assert result.entry_id is None
+    assert result.should_embed_entry is False
+    assert calls["closed"] == [{"snapshot_id": snapshot.id, "status": "postponed"}]
+
+
+async def test_record_button_action_embeds_existing_snapshot_answer_without_new_entry(monkeypatch) -> None:
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
+    snapshot = SimpleNamespace(id=uuid4())
+    entry = SimpleNamespace(id=uuid4(), source="snapshot_response")
+
+    async def get_open_snapshot(session, *, user_id):
+        assert user_id == user.id
+        return snapshot
+
+    async def list_snapshot_entries(session, *, snapshot_id):
+        assert snapshot_id == snapshot.id
+        return [entry]
+
+    async def close_snapshot(session, *, snapshot_id, status="closed"):
+        assert snapshot_id == snapshot.id
+        assert status == "closed_by_user"
+
+    async def add_entry(session, **kwargs):
+        raise AssertionError("button controls must not create diary entries")
+
+    monkeypatch.setattr(interactions_module.repo, "get_open_snapshot", get_open_snapshot)
+    monkeypatch.setattr(interactions_module.repo, "list_snapshot_entries", list_snapshot_entries)
+    monkeypatch.setattr(interactions_module.repo, "close_snapshot", close_snapshot)
+    monkeypatch.setattr(interactions_module.repo, "add_entry", add_entry)
+
+    service = InteractionService(SimpleNamespace(), None)
+    result = await service.record_button_action(object(), user=user, action="as_is")
+
+    assert result.entry_id == entry.id
+    assert result.should_embed_entry is True
+    assert result.replies[0].keyboard == "correction"
 
 
 async def test_record_correction_returns_revised_summary_with_correction_keyboard(monkeypatch) -> None:

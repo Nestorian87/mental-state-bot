@@ -200,30 +200,14 @@ class InteractionService:
         user: User,
         action: str,
     ) -> InteractionResult:
-        day = await self._current_day(session, user)
         open_snapshot = await repo.get_open_snapshot(session, user_id=user.id)
         if open_snapshot is None:
             return InteractionResult(
                 replies=[BotReply("Цей зріз уже неактуальний. Якщо хочеш, можна почати новий.")],
                 snapshot_closed=True,
             )
-        raw_text = {
-            "as_is": "записати як є",
-            "stop": "не хочу більше зараз говорити",
-            "later": "пізніше",
-        }.get(action, action)
-        entry = await repo.add_entry(
-            session,
-            user_id=user.id,
-            day_id=day.id,
-            snapshot_id=open_snapshot.id,
-            source=f"button_{action}",
-            raw_text=raw_text,
-            telegram_message_id=None,
-            reply_to_message_id=None,
-            local_timestamp=local_now(user.timezone),
-            meta={"button_action": action},
-        )
+        snapshot_entries = await repo.list_snapshot_entries(session, snapshot_id=open_snapshot.id)
+        target_entry = _latest_content_entry(snapshot_entries)
         await repo.close_snapshot(
             session,
             snapshot_id=open_snapshot.id,
@@ -235,10 +219,10 @@ class InteractionService:
             "later": "Ок, повернуся пізніше без спаму.",
         }.get(action, "Записав.")
         return InteractionResult(
-            replies=[BotReply(text, keyboard="correction" if action in {"as_is", "stop"} else None)],
-            entry_id=entry.id,
+            replies=[BotReply(text, keyboard="correction" if target_entry and action in {"as_is", "stop"} else None)],
+            entry_id=target_entry.id if target_entry else None,
             snapshot_closed=True,
-            should_embed_entry=True,
+            should_embed_entry=target_entry is not None,
         )
 
     async def record_correction(
@@ -530,6 +514,16 @@ def _entry_context(entry: Entry) -> dict[str, Any]:
         "source": entry.source,
         "raw_text": entry.raw_text,
     }
+
+
+def _latest_content_entry(entries) -> Entry | None:
+    for entry in reversed(list(entries)):
+        if entry.source in {"correction", "profile_context_update"}:
+            continue
+        if str(entry.source).startswith("button_"):
+            continue
+        return entry
+    return None
 
 
 def _missing_core_metrics(features: EntryFeatures) -> list[str]:
