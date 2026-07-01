@@ -18,12 +18,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from mental_state_bot.ai.service import AIService
 from mental_state_bot.bot.keyboards import (
     correction_keyboard,
+    data_menu_keyboard,
     day_detail_keyboard,
+    day_menu_keyboard,
+    main_menu_keyboard,
     main_reply_keyboard,
+    memory_menu_keyboard,
+    period_choice_keyboard,
     period_detail_keyboard,
+    settings_capture_keyboard,
     settings_keyboard,
+    settings_rhythm_keyboard,
+    settings_style_keyboard,
     sleep_confirmation_keyboard,
     snapshot_clarification_keyboard,
+    summaries_menu_keyboard,
     summary_detail_keyboard,
     voice_transcription_keyboard,
 )
@@ -76,7 +85,7 @@ from mental_state_bot.services.review import (
 )
 from mental_state_bot.services.snapshots import send_snapshot_prompt
 from mental_state_bot.services.summaries import SummaryService
-from mental_state_bot.time_utils import zoneinfo
+from mental_state_bot.time_utils import local_date, zoneinfo
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -128,6 +137,13 @@ async def help_handler(message: Message, settings: Settings) -> None:
     if not await _allowed(message, settings):
         return
     await message.answer(_help_text(), reply_markup=main_reply_keyboard())
+
+
+@router.message(F.text == "Меню")
+async def menu_button_handler(message: Message, settings: Settings) -> None:
+    if not await _allowed(message, settings):
+        return
+    await message.answer("Головне меню.", reply_markup=main_menu_keyboard())
 
 
 @router.message(Command("snapshot"))
@@ -412,18 +428,12 @@ async def similar_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         async with _typing(message):
-            records = await memory_service.similar_entries(session, user_id=user.id, query_text=query, limit=6)
-        records = list(records)
-        entry_ids = [record.target_id for record in records if record.target_type == "entry"]
-        entries = list(await repo.list_entries_by_ids(session, entry_ids=entry_ids))
-        analyses = list(await repo.list_analyses_for_targets(session, target_type="entry", target_ids=entry_ids))
-        text = format_similar_entries(
-            records,
-            query=query,
-            entries=entries,
-            analyses=analyses,
-            timezone=user.timezone,
-        )
+            text = await _format_similar_memory_query(
+                session,
+                user=user,
+                memory_service=memory_service,
+                query=query,
+            )
     await _answer_long_text(message, text)
 
 
@@ -819,6 +829,161 @@ async def snapshot_new_callback_handler(
         await callback.message.answer("Зараз уже є відкритий зріз. Можна відповісти на нього або відкласти.")
 
 
+@router.callback_query(F.data.startswith("menu:"))
+async def menu_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    summary_service: SummaryService,
+    memory_service: MemoryService,
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    action = callback.data or "menu:main"
+    if action == "menu:main":
+        await callback.answer()
+        await _edit_or_answer_menu(callback, "Головне меню.", main_menu_keyboard())
+        return
+    if action == "menu:day":
+        await callback.answer()
+        await _edit_or_answer_menu(callback, "День.", day_menu_keyboard())
+        return
+    if action == "menu:summaries":
+        await callback.answer()
+        await _edit_or_answer_menu(callback, "Підсумки.", summaries_menu_keyboard())
+        return
+    if action == "menu:summaries:week":
+        await callback.answer()
+        await _edit_or_answer_menu(callback, "Тижневий підсумок.", period_choice_keyboard(period="week"))
+        return
+    if action == "menu:summaries:month":
+        await callback.answer()
+        await _edit_or_answer_menu(callback, "Місячний підсумок.", period_choice_keyboard(period="month"))
+        return
+    if action == "menu:memory":
+        await callback.answer()
+        await _edit_or_answer_menu(
+            callback,
+            "Пам’ять.",
+            memory_menu_keyboard(embeddings_enabled=_embeddings_ready(settings)),
+        )
+        return
+    if action == "menu:data":
+        await callback.answer()
+        await _edit_or_answer_menu(callback, "Дані й архів.", data_menu_keyboard())
+        return
+
+    if action in {"menu:day:today", "menu:day:yesterday"}:
+        async with sessionmaker() as session, session.begin():
+            user = await _get_or_create_callback_user(session, callback, settings)
+            target_date = local_date(user.timezone)
+            if action == "menu:day:yesterday":
+                target_date -= timedelta(days=1)
+            text, day_id = await _format_day_for_date(session, user=user, target_date=target_date)
+        await callback.answer()
+        await _answer_long_text(
+            callback.message,
+            text,
+            reply_markup=day_detail_keyboard(day_id=day_id) if day_id else day_menu_keyboard(),
+        )
+        return
+
+    if action == "menu:day:date":
+        async with sessionmaker() as session, session.begin():
+            user = await _get_or_create_callback_user(session, callback, settings)
+            user_settings = await repo.get_user_settings(session, user.id)
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={"settings_json": settings_json_with_pending_input(user_settings, "day_date")},
+            )
+        await callback.answer()
+        await callback.message.answer(
+            "Напиши дату, яку відкрити. Наприклад: 2026-06-30, 30.06.2026, сьогодні або вчора.",
+            reply_markup=main_reply_keyboard("Напиши дату: 2026-06-30"),
+        )
+        return
+
+    if action == "menu:summaries:day":
+        async with sessionmaker() as session, session.begin():
+            user = await _get_or_create_callback_user(session, callback, settings)
+            async with _typing(callback.message):
+                summary = await summary_service.generate_today_summary(session, user=user)
+        await callback.answer()
+        await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard(summary_id=str(summary.id)))
+        return
+
+    if action.startswith("menu:period:"):
+        parts = action.split(":")
+        period = parts[2] if len(parts) > 2 else "week"
+        choice = parts[3] if len(parts) > 3 else "current"
+        async with sessionmaker() as session, session.begin():
+            user = await _get_or_create_callback_user(session, callback, settings)
+            async with _typing(callback.message):
+                if period == "month" and choice == "previous":
+                    summary = await summary_service.generate_previous_month_summary(session, user=user)
+                elif period == "month":
+                    summary = await summary_service.generate_current_month_summary(session, user=user)
+                elif choice == "previous":
+                    summary = await summary_service.generate_previous_week_summary(session, user=user)
+                else:
+                    summary = await summary_service.generate_current_week_summary(session, user=user)
+            text = format_period_summary(summary)
+            summary_id = str(summary.id)
+        await callback.answer()
+        await _answer_long_text(callback.message, text, reply_markup=period_detail_keyboard(summary_id=summary_id))
+        return
+
+    if action == "menu:memory:search":
+        async with sessionmaker() as session, session.begin():
+            user = await _get_or_create_callback_user(session, callback, settings)
+            user_settings = await repo.get_user_settings(session, user.id)
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={"settings_json": settings_json_with_pending_input(user_settings, "memory_search")},
+            )
+        await callback.answer()
+        await callback.message.answer(
+            "Що пошукати в пам’яті?",
+            reply_markup=main_reply_keyboard("Наприклад: гуляю, не можу почати, спокійний вечір"),
+        )
+        return
+
+    if action == "menu:memory:last":
+        if not _embeddings_ready(settings):
+            await callback.answer("Embeddings не активні", show_alert=True)
+            return
+        async with sessionmaker() as session, session.begin():
+            user = await _get_or_create_callback_user(session, callback, settings)
+            recent = await repo.get_recent_entries(session, user_id=user.id, limit=1)
+            if not recent or not (recent[-1].raw_text or "").strip():
+                text = "Поки немає текстового останнього запису, від якого можна шукати схожі моменти."
+            else:
+                async with _typing(callback.message):
+                    text = await _format_similar_memory_query(
+                        session,
+                        user=user,
+                        memory_service=memory_service,
+                        query=recent[-1].raw_text or "",
+                    )
+        await callback.answer()
+        await _answer_long_text(callback.message, text, reply_markup=memory_menu_keyboard(embeddings_enabled=True))
+        return
+
+    if action == "menu:memory:status":
+        await callback.answer()
+        text = (
+            "Embeddings увімкнені й ключ налаштований."
+            if _embeddings_ready(settings)
+            else "Embeddings зараз не активні. Для пошуку потрібні EMBEDDINGS_ENABLED=true і EMBEDDING_API_KEY."
+        )
+        await _edit_or_answer_menu(callback, text, memory_menu_keyboard(embeddings_enabled=_embeddings_ready(settings)))
+        return
+
+    await callback.answer("Не впізнав дію", show_alert=True)
+
+
 @router.callback_query(F.data == "day:today")
 async def today_callback_handler(
     callback: CallbackQuery,
@@ -984,7 +1149,7 @@ async def home_callback_handler(callback: CallbackQuery, settings: Settings) -> 
     if not await _allowed_callback(callback, settings):
         return
     await callback.answer()
-    await callback.message.answer("Головне меню.", reply_markup=main_reply_keyboard())
+    await callback.message.answer("Головне меню.", reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == "ai:costs")
@@ -1031,7 +1196,17 @@ async def settings_callback_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
         user_settings = await repo.get_user_settings(session, user.id)
-        if action == "settings:pause":
+        if action.startswith("settings:section:"):
+            notice = "Налаштування."
+        elif action == "settings:toggle:pause":
+            await repo.set_user_active(session, user_id=user.id, is_active=True)
+            user_settings = await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={"settings_json": settings_json_with_snapshot_pause(user_settings, not snapshots_paused(user_settings))},
+            )
+            notice = "Автоматичні зрізи оновлено."
+        elif action == "settings:pause":
             await repo.set_user_active(session, user_id=user.id, is_active=True)
             user_settings = await repo.update_user_settings(
                 session,
@@ -1113,7 +1288,7 @@ async def settings_callback_handler(
             user_settings=user_settings,
             snapshots_are_paused=snapshots_paused(user_settings),
         )
-        keyboard = settings_keyboard(user_settings=user_settings)
+        keyboard = _settings_keyboard_for_action(action, user_settings=user_settings)
     await callback.answer(notice)
     if action == "settings:custom_style":
         await callback.message.answer(
@@ -1313,6 +1488,7 @@ async def entry_handler(
     replies = []
     user_id = None
     voice_note: VoiceNoteTranscription | None = None
+    direct_response_sent = False
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         user_id = user.id
@@ -1366,6 +1542,51 @@ async def entry_handler(
         pending_kind = pending_input(user_settings)
         if replies:
             pass
+        elif pending_kind == "day_date" and not message.photo:
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={"settings_json": settings_json_without_pending_input(user_settings)},
+            )
+            target_date = _parse_day_query(text, user.timezone)
+            if target_date is None:
+                await message.answer(
+                    "Не впізнав дату. Напиши, наприклад: 2026-06-30, 30.06.2026, сьогодні або вчора.",
+                    reply_markup=day_menu_keyboard(),
+                )
+            else:
+                day_text, day_id = await _format_day_for_date(session, user=user, target_date=target_date)
+                await _answer_long_text(
+                    message,
+                    day_text,
+                    reply_markup=day_detail_keyboard(day_id=day_id) if day_id else day_menu_keyboard(),
+                )
+            direct_response_sent = True
+        elif pending_kind == "memory_search" and not message.photo:
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={"settings_json": settings_json_without_pending_input(user_settings)},
+            )
+            if not _embeddings_ready(settings):
+                await message.answer(
+                    "Пошук у пам’яті зараз не активний: потрібні EMBEDDINGS_ENABLED=true і EMBEDDING_API_KEY.",
+                    reply_markup=memory_menu_keyboard(embeddings_enabled=False),
+                )
+            else:
+                async with _typing(message, bot):
+                    memory_text = await _format_similar_memory_query(
+                        session,
+                        user=user,
+                        memory_service=memory_service,
+                        query=text,
+                    )
+                await _answer_long_text(
+                    message,
+                    memory_text,
+                    reply_markup=memory_menu_keyboard(embeddings_enabled=True),
+                )
+            direct_response_sent = True
         elif pending_kind and not message.photo:
             async with _typing(message, bot):
                 result = await _handle_pending_input(
@@ -1411,6 +1632,8 @@ async def entry_handler(
         if voice_note and entry_id is not None:
             await _store_voice_note(session, user_id=user.id, entry_id=entry_id, voice_note=voice_note)
 
+    if direct_response_sent:
+        return
     for reply in replies:
         await message.answer(
             reply.text,
@@ -2085,6 +2308,48 @@ async def _format_day_detail_section(
     return text, chart, moments
 
 
+async def _format_day_for_date(
+    session: AsyncSession, *, user: User, target_date: date
+) -> tuple[str, str | None]:
+    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=target_date)
+    if day is None:
+        return f"За {target_date.isoformat()} ще немає збереженого дня.", None
+    text = await format_day_view(session, user=user, day=day, limit=30)
+    return text, str(day.id)
+
+
+async def _format_similar_memory_query(
+    session: AsyncSession,
+    *,
+    user: User,
+    memory_service: MemoryService,
+    query: str,
+) -> str:
+    records = list(await memory_service.similar_entries(session, user_id=user.id, query_text=query, limit=6))
+    entry_ids = [record.target_id for record in records if record.target_type == "entry"]
+    entries = list(await repo.list_entries_by_ids(session, entry_ids=entry_ids))
+    analyses = list(await repo.list_analyses_for_targets(session, target_type="entry", target_ids=entry_ids))
+    return format_similar_entries(
+        records,
+        query=query,
+        entries=entries,
+        analyses=analyses,
+        timezone=user.timezone,
+    )
+
+
+def _embeddings_ready(settings: Settings) -> bool:
+    return bool(settings.embeddings_enabled and settings.embedding_api_key)
+
+
+async def _edit_or_answer_menu(callback: CallbackQuery, text: str, reply_markup) -> None:
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    except Exception:
+        logger.debug("Could not edit menu message", exc_info=True)
+        await callback.message.answer(text, reply_markup=reply_markup)
+
+
 def _parse_day_query(query: str, timezone: str) -> date | None:
     normalized = " ".join(query.strip().lower().split())
     if not normalized:
@@ -2211,6 +2476,20 @@ def _format_settings_text(*, user_settings: UserSettings, snapshots_are_paused: 
             "скинути контекст",
         ]
     )
+
+
+def _settings_keyboard_for_action(action: str, *, user_settings: UserSettings):
+    if action == "settings:section:rhythm" or action.startswith(("settings:freq:", "settings:reminder:")):
+        return settings_rhythm_keyboard(user_settings=user_settings)
+    if action in {"settings:pause", "settings:resume", "settings:toggle:pause"}:
+        return settings_rhythm_keyboard(user_settings=user_settings)
+    if action == "settings:section:style" or action.startswith(("settings:tone:", "settings:humanity:")):
+        return settings_style_keyboard(user_settings=user_settings)
+    if action in {"settings:custom_style", "settings:profile_context"}:
+        return settings_style_keyboard(user_settings=user_settings)
+    if action == "settings:section:capture" or action in {"settings:toggle:body", "settings:toggle:photo"}:
+        return settings_capture_keyboard(user_settings=user_settings)
+    return settings_keyboard(user_settings=user_settings)
 
 
 def _frequency_preset_values(preset: str) -> dict[str, int]:

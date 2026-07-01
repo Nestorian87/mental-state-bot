@@ -23,10 +23,17 @@ from mental_state_bot.bot.handlers import (
     _voice_transcription_preview,
 )
 from mental_state_bot.bot.keyboards import (
+    data_menu_keyboard,
     day_detail_keyboard,
+    day_menu_keyboard,
+    main_menu_keyboard,
     main_reply_keyboard,
+    memory_menu_keyboard,
     missed_prompt_keyboard,
     period_detail_keyboard,
+    settings_capture_keyboard,
+    settings_rhythm_keyboard,
+    settings_style_keyboard,
     summary_detail_keyboard,
     voice_transcription_keyboard,
 )
@@ -71,6 +78,13 @@ def test_main_reply_keyboard_limits_long_placeholder() -> None:
     keyboard = main_reply_keyboard("x" * 80)
 
     assert keyboard.input_field_placeholder == "x" * 64
+
+
+def test_main_reply_keyboard_stays_small() -> None:
+    keyboard = main_reply_keyboard()
+    labels = [button.text for row in keyboard.keyboard for button in row]
+
+    assert labels == ["Меню", "Новий зріз", "Лягаю спати"]
 
 
 def test_help_text_mentions_core_commands() -> None:
@@ -148,6 +162,44 @@ def test_day_detail_keyboard_scopes_callbacks_to_day() -> None:
     assert f"dayview:{day_id}:gaps" in callbacks
 
 
+def test_main_menu_groups_sections() -> None:
+    keyboard = main_menu_keyboard()
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert {"menu:day", "menu:summaries", "menu:memory", "menu:data", "settings:open"} <= callbacks
+    assert len(keyboard.inline_keyboard) == 3
+
+
+def test_submenus_expose_grouped_actions() -> None:
+    day_callbacks = {
+        button.callback_data
+        for row in day_menu_keyboard().inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+    memory_callbacks = {
+        button.callback_data
+        for row in memory_menu_keyboard(embeddings_enabled=True).inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+    data_callbacks = {
+        button.callback_data
+        for row in data_menu_keyboard().inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert "menu:day:date" in day_callbacks
+    assert "menu:memory:search" in memory_callbacks
+    assert "archive:export_zip" in data_callbacks
+
+
 def test_period_detail_keyboard_scopes_callbacks_to_summary() -> None:
     summary_id = str(uuid4())
     keyboard = period_detail_keyboard(summary_id=summary_id)
@@ -161,6 +213,46 @@ def test_period_detail_keyboard_scopes_callbacks_to_summary() -> None:
     assert f"periodview:{summary_id}:overview" in callbacks
     assert f"periodview:{summary_id}:timeline" in callbacks
     assert f"periodview:{summary_id}:chart" in callbacks
+
+
+def test_settings_keyboards_mark_active_options() -> None:
+    settings = SimpleNamespace(
+        settings_json={"custom_interaction_style": "коротко"},
+        ask_body_signals=True,
+        photo_prompts_enabled=False,
+        min_interval_minutes=30,
+        max_interval_minutes=70,
+        reminder_delay_minutes=25,
+        tone="calm",
+        humanity_level="warm",
+    )
+    main_callbacks = {
+        button.text
+        for row in main_menu_keyboard().inline_keyboard
+        for button in row
+    }
+    rhythm_labels = {
+        button.text
+        for row in settings_rhythm_keyboard(user_settings=settings).inline_keyboard
+        for button in row
+    }
+    style_labels = {
+        button.text
+        for row in settings_style_keyboard(user_settings=settings).inline_keyboard
+        for button in row
+    }
+    capture_labels = {
+        button.text
+        for row in settings_capture_keyboard(user_settings=settings).inline_keyboard
+        for button in row
+    }
+
+    assert "Налаштування" in main_callbacks
+    assert "✅ Норм" in rhythm_labels
+    assert "✅ 25 хв" in rhythm_labels
+    assert "✅ Спокійний" in style_labels
+    assert "✅ Людяніше" in style_labels
+    assert "✅ Питати про тіло" in capture_labels
 
 
 def test_previous_period_query_aliases() -> None:
