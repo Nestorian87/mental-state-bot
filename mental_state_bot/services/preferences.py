@@ -10,6 +10,7 @@ USER_PROFILE_CONTEXT_KEY = "user_profile_context"
 PENDING_INPUT_KEY = "pending_input"
 PENDING_VOICE_TRANSCRIPT_KEY = "pending_voice_transcript"
 PENDING_MANUAL_ENTRY_KEY = "pending_manual_entry"
+PENDING_CORRECTION_ENTRY_ID_KEY = "pending_correction_entry_id"
 PENDING_INPUT_KINDS = {
     "custom_style",
     "profile_context",
@@ -80,7 +81,30 @@ def settings_json_with_pending_input(settings: UserSettings, kind: str | None) -
 
 
 def settings_json_without_pending_input(settings: UserSettings) -> dict[str, Any]:
-    return settings_json_with_pending_input(settings, None)
+    current = settings_json_with_pending_input(settings, None)
+    current.pop(PENDING_CORRECTION_ENTRY_ID_KEY, None)
+    return current
+
+
+def pending_correction_entry_id(settings: UserSettings) -> str | None:
+    value = (getattr(settings, "settings_json", None) or {}).get(PENDING_CORRECTION_ENTRY_ID_KEY)
+    return str(value) if value else None
+
+
+def settings_json_with_pending_correction_entry_id(
+    settings: UserSettings,
+    entry_id: str | None,
+) -> dict[str, Any]:
+    current = dict(getattr(settings, "settings_json", None) or {})
+    if entry_id is None:
+        current.pop(PENDING_CORRECTION_ENTRY_ID_KEY, None)
+    else:
+        current[PENDING_CORRECTION_ENTRY_ID_KEY] = entry_id
+    return current
+
+
+def settings_json_without_pending_correction_entry_id(settings: UserSettings) -> dict[str, Any]:
+    return settings_json_with_pending_correction_entry_id(settings, None)
 
 
 def pending_voice_transcript(settings: UserSettings) -> dict[str, Any] | None:

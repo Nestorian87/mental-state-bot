@@ -27,6 +27,7 @@ from mental_state_bot.bot.handlers import (
     _voice_transcription_preview,
 )
 from mental_state_bot.bot.keyboards import (
+    correction_keyboard,
     data_menu_keyboard,
     day_detail_keyboard,
     day_menu_keyboard,
@@ -47,13 +48,16 @@ from mental_state_bot.bot.keyboards import (
 )
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
+    pending_correction_entry_id,
     pending_input,
     pending_manual_entry,
     pending_voice_transcript,
     settings_json_with_custom_interaction_style,
+    settings_json_with_pending_correction_entry_id,
     settings_json_with_pending_manual_entry,
     settings_json_with_pending_voice_transcript,
     settings_json_with_snapshot_pause,
+    settings_json_without_pending_input,
     settings_json_without_pending_manual_entry,
     settings_json_without_pending_voice_transcript,
     snapshots_paused,
@@ -170,6 +174,7 @@ def test_summary_detail_keyboard_scopes_callbacks_to_summary() -> None:
 
     assert f"summary:{summary_id}:story" in callbacks
     assert f"summary:{summary_id}:timeline" in callbacks
+    assert f"summary:{summary_id}:refresh" in callbacks
     assert "summary:timeline" not in callbacks
 
 
@@ -186,6 +191,20 @@ def test_day_detail_keyboard_scopes_callbacks_to_day() -> None:
     assert f"dayview:{day_id}:story" in callbacks
     assert f"dayview:{day_id}:gaps" in callbacks
     assert f"dayview:{day_id}:entries" in callbacks
+    assert f"dayview:{day_id}:refresh" in callbacks
+
+
+def test_correction_keyboard_can_target_entry() -> None:
+    entry_id = str(uuid4())
+    keyboard = correction_keyboard(entry_id=entry_id)
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert callbacks == {f"correction:start:{entry_id}"}
 
 
 def test_entry_management_keyboards_require_confirmation() -> None:
@@ -368,6 +387,19 @@ def test_voice_transcript_pending_state_roundtrip() -> None:
 
     assert pending_input(settings) is None
     assert pending_voice_transcript(settings) is None
+
+
+def test_pending_correction_target_clears_with_pending_input() -> None:
+    entry_id = str(uuid4())
+    settings = SimpleNamespace(settings_json={"pending_input": "correction"})
+    settings.settings_json = settings_json_with_pending_correction_entry_id(settings, entry_id)
+
+    assert pending_correction_entry_id(settings) == entry_id
+
+    settings.settings_json = settings_json_without_pending_input(settings)
+
+    assert pending_input(settings) is None
+    assert pending_correction_entry_id(settings) is None
 
 
 def test_manual_entry_pending_state_roundtrip() -> None:

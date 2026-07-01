@@ -294,6 +294,22 @@ def test_format_summary_story_section() -> None:
     assert "- після обіду стало трохи ясніше" in text
 
 
+def test_format_summary_section_marks_stale_summary() -> None:
+    summary = SimpleNamespace(
+        short_text="Старий короткий підсумок.",
+        details={
+            "story": "Старий текст.",
+            "stale": {"reason": "entry_deleted", "marked_at": "2026-07-01T10:00:00+00:00"},
+        },
+    )
+
+    text = format_summary_section(summary, "story")
+
+    assert text.startswith("Підсумок може бути застарілим: запис було видалено.")
+    assert "Оновити підсумок" in text
+    assert "Старий текст." in text
+
+
 def test_format_summary_metrics_section_with_gaps() -> None:
     summary = SimpleNamespace(
         id=uuid4(),

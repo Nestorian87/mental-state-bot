@@ -50,6 +50,7 @@ from mental_state_bot.services.interactions import BotReply, InteractionResult, 
 from mental_state_bot.services.memory import MemoryService
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
+    pending_correction_entry_id,
     pending_input,
     pending_manual_entry,
     pending_voice_transcript,
@@ -1076,6 +1077,7 @@ async def day_detail_callback_handler(
     callback: CallbackQuery,
     settings: Settings,
     sessionmaker: async_sessionmaker[AsyncSession],
+    summary_service: SummaryService,
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
@@ -1102,6 +1104,11 @@ async def day_detail_callback_handler(
                     day_id=str(day.id),
                     entries=_entry_management_buttons(entries, timezone=user.timezone),
                 )
+            elif section == "refresh":
+                async with _typing(callback.message):
+                    summary = await summary_service.generate_day_summary(session, user=user, day=day)
+                text = summary.short_text
+                reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
             else:
                 text, chart, moments = await _format_day_detail_section(session, user=user, day=day, section=section)
     await callback.answer()
@@ -1160,6 +1167,13 @@ async def entry_management_callback_handler(
                 text = "Не зміг видалити запис: він уже зник або не належить тобі."
                 reply_markup = None
             else:
+                if deleted.day_id is not None:
+                    await repo.mark_day_summaries_stale(
+                        session,
+                        user_id=user.id,
+                        day_id=deleted.day_id,
+                        reason="entry_deleted",
+                    )
                 if should_reopen_day and deleted.day_id is not None:
                     await repo.reopen_day(session, day_id=deleted.day_id)
                 text = f"Видалив запис:\n\n{preview}"
@@ -1177,6 +1191,7 @@ async def summary_detail_callback_handler(
     callback: CallbackQuery,
     settings: Settings,
     sessionmaker: async_sessionmaker[AsyncSession],
+    summary_service: SummaryService,
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
@@ -1196,7 +1211,12 @@ async def summary_detail_callback_handler(
             else:
                 reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
                 day = await repo.get_day(session, day_id=summary.day_id) if summary.day_id else None
-                if day is not None and day.user_id == user.id and section in _DAY_DETAIL_SECTIONS:
+                if section == "refresh" and day is not None and day.user_id == user.id:
+                    async with _typing(callback.message):
+                        summary = await summary_service.generate_day_summary(session, user=user, day=day)
+                    text = summary.short_text
+                    reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
+                elif day is not None and day.user_id == user.id and section in _DAY_DETAIL_SECTIONS:
                     text, chart, moments = await _format_day_detail_section(
                         session,
                         user=user,
@@ -1210,7 +1230,12 @@ async def summary_detail_callback_handler(
             if summary is not None:
                 reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
                 day = await repo.get_day(session, day_id=summary.day_id) if summary.day_id else None
-                if day is not None and day.user_id == user.id and section in _DAY_DETAIL_SECTIONS:
+                if section == "refresh" and day is not None and day.user_id == user.id:
+                    async with _typing(callback.message):
+                        summary = await summary_service.generate_day_summary(session, user=user, day=day)
+                    text = summary.short_text
+                    reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
+                elif day is not None and day.user_id == user.id and section in _DAY_DETAIL_SECTIONS:
                     text, chart, moments = await _format_day_detail_section(
                         session,
                         user=user,
@@ -1448,7 +1473,7 @@ async def settings_callback_handler(
         await callback.message.answer(text, reply_markup=keyboard)
 
 
-@router.callback_query(F.data == "correction:start")
+@router.callback_query(F.data.startswith("correction:start"))
 async def correction_start_callback_handler(
     callback: CallbackQuery,
     settings: Settings,
@@ -1456,13 +1481,19 @@ async def correction_start_callback_handler(
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
+    target_entry_id = _correction_target_from_callback(callback.data or "")
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
         user_settings = await repo.get_user_settings(session, user.id)
+        next_settings_json = settings_json_with_pending_input(user_settings, "correction")
+        if target_entry_id:
+            next_settings_json["pending_correction_entry_id"] = str(target_entry_id)
+        else:
+            next_settings_json.pop("pending_correction_entry_id", None)
         await repo.update_user_settings(
             session,
             user_id=user.id,
-            values={"settings_json": settings_json_with_pending_input(user_settings, "correction")},
+            values={"settings_json": next_settings_json},
         )
     await callback.answer()
     await _clear_inline_keyboard(callback)
@@ -2037,6 +2068,7 @@ async def _handle_pending_input(
             snapshot_closed=True,
         )
     if pending_kind == "correction":
+        target_entry_id = _uuid_or_none(pending_correction_entry_id(user_settings))
         await repo.update_user_settings(
             session,
             user_id=user.id,
@@ -2048,6 +2080,7 @@ async def _handle_pending_input(
             correction_text=text,
             telegram_message_id=message.message_id,
             reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None,
+            target_entry_id=target_entry_id,
         )
     if pending_kind in {"voice_transcript", "voice_transcript_fix"}:
         return await _confirm_pending_voice_transcript(
@@ -2522,6 +2555,9 @@ def _inline_reply_keyboard(kind: str | None):
         return snapshot_clarification_keyboard()
     if kind == "correction":
         return correction_keyboard()
+    if kind and kind.startswith("correction:"):
+        entry_id = kind.split(":", maxsplit=1)[1]
+        return correction_keyboard(entry_id=entry_id)
     if kind == "voice_transcript":
         return voice_transcription_keyboard()
     if kind == "manual_entry_confirm":
@@ -2531,9 +2567,17 @@ def _inline_reply_keyboard(kind: str | None):
     return None
 
 
+def _correction_target_from_callback(callback_data: str) -> UUID | None:
+    parts = callback_data.split(":")
+    if len(parts) != 3:
+        return None
+    return _uuid_or_none(parts[2])
+
+
 def _without_pending(settings_json: dict) -> dict:
     updated = dict(settings_json)
     updated.pop("pending_input", None)
+    updated.pop("pending_correction_entry_id", None)
     return updated
 
 

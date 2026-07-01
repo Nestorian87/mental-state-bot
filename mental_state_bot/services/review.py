@@ -382,10 +382,12 @@ async def format_day_summary_section(session: AsyncSession, *, user: User, day: 
 
 def format_summary_section(summary: Summary, section: str) -> str:
     details = summary.details or {}
+    stale_notice = _stale_summary_notice(details)
     if section == "story":
         return "\n\n".join(
             part
             for part in [
+                stale_notice,
                 "Історія дня",
                 details.get("story") or summary.short_text,
                 _list_block("Що реально відбувалося", details.get("actual_activities") or []),
@@ -395,7 +397,8 @@ def format_summary_section(summary: Summary, section: str) -> str:
         )
     if section == "metrics":
         return "\n".join(
-            [
+            [line for line in [
+                stale_notice,
                 "Спостереження з підсумку",
                 "",
                 f"Найважчий відрізок: {details.get('hardest_interval') or 'неясно'}",
@@ -406,19 +409,33 @@ def format_summary_section(summary: Summary, section: str) -> str:
                 _list_block("Обережні спостереження", details.get("cautious_observations") or []),
                 "",
                 f"Якість даних: {_data_quality_label(details.get('data_quality'))}",
-            ]
+            ] if line is not None]
         )
     if section == "timeline":
         return "\n".join(
-            [
+            [line for line in [
+                stale_notice,
                 "Таймлайн з підсумку",
                 "",
                 details.get("story") or summary.short_text,
                 "",
                 _list_block("Прогалини", details.get("data_gaps") or []),
-            ]
+            ] if line is not None]
         )
+    if stale_notice:
+        return f"{stale_notice}\n\n{summary.short_text}"
     return summary.short_text
+
+
+def _stale_summary_notice(details: dict[str, Any]) -> str | None:
+    stale = details.get("stale")
+    if not isinstance(stale, dict):
+        return None
+    reason = {
+        "entry_deleted": "запис було видалено",
+        "entry_corrected": "запис було виправлено",
+    }.get(str(stale.get("reason") or ""), "дані дня змінилися")
+    return f"Підсумок може бути застарілим: {reason}. Можна натиснути “Оновити підсумок”."
 
 
 def format_period_summary(summary: Summary) -> str:

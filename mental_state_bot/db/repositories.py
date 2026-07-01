@@ -859,6 +859,30 @@ async def get_day_summary(
     return result.scalar_one_or_none()
 
 
+async def mark_day_summaries_stale(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    day_id: uuid.UUID,
+    reason: str,
+) -> int:
+    result = await session.execute(
+        select(Summary).where(Summary.user_id == user_id, Summary.day_id == day_id, Summary.period_type == "daily")
+    )
+    summaries = result.scalars().all()
+    now = utc_now().isoformat()
+    for summary in summaries:
+        summary.details = {
+            **(summary.details or {}),
+            "stale": {
+                "reason": reason,
+                "marked_at": now,
+            },
+        }
+    await session.flush()
+    return len(summaries)
+
+
 async def list_summaries_between(
     session: AsyncSession,
     *,

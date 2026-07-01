@@ -352,7 +352,7 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     )
     snapshot = SimpleNamespace(id=snapshot_id, context_json={"intent": "state_and_activity"})
     user = SimpleNamespace(id=user_id, timezone="Europe/Kyiv")
-    calls = {"feature_context": None, "micro_context": None, "analyses": []}
+    calls = {"feature_context": None, "micro_context": None, "analyses": [], "stale": []}
 
     class FakeSession:
         async def get(self, model, item_id):
@@ -397,12 +397,17 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     async def analyze_entry_features(session, **kwargs):
         calls["feature_context"] = kwargs
 
+    async def mark_day_summaries_stale(session, **kwargs):
+        calls["stale"].append(kwargs)
+        return 1
+
     monkeypatch.setattr(interactions_module.repo, "get_recent_entries", get_recent_entries)
     monkeypatch.setattr(interactions_module.repo, "get_user_settings", get_user_settings)
     monkeypatch.setattr(interactions_module.repo, "list_day_entries", list_day_entries)
     monkeypatch.setattr(interactions_module.repo, "get_snapshot_prompts", get_snapshot_prompts)
     monkeypatch.setattr(interactions_module.repo, "list_snapshot_entries", list_snapshot_entries)
     monkeypatch.setattr(interactions_module.repo, "add_ai_analysis", add_ai_analysis)
+    monkeypatch.setattr(interactions_module.repo, "mark_day_summaries_stale", mark_day_summaries_stale)
     monkeypatch.setattr(interactions_module, "analyze_entry_features", analyze_entry_features)
 
     service = InteractionService(SimpleNamespace(ai_provider="deepseek", ai_live_model="flash"), FakeAI())
@@ -415,7 +420,7 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     )
 
     assert result.replies[-1].text == "Я почув, що “Море” — це назва треку, який ти мастериш."
-    assert result.replies[-1].keyboard == "correction"
+    assert result.replies[-1].keyboard == f"correction:{target_id}"
     assert result.entry_id == target_id
     assert result.should_embed_entry is True
     assert calls["micro_context"]["latest_prompt"] == "Який трек мастериш?"
@@ -428,3 +433,4 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
         "generate_micro_summary",
     ]
     assert {item["target_id"] for item in calls["analyses"]} == {target_id}
+    assert calls["stale"] == [{"user_id": user_id, "day_id": day_id, "reason": "entry_corrected"}]

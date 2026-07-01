@@ -49,10 +49,11 @@ def snapshot_clarification_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def correction_keyboard() -> InlineKeyboardMarkup:
+def correction_keyboard(*, entry_id: str | None = None) -> InlineKeyboardMarkup:
+    callback_data = f"correction:start:{entry_id}" if entry_id else "correction:start"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Виправити", callback_data="correction:start")],
+            [InlineKeyboardButton(text="Виправити", callback_data=callback_data)],
         ]
     )
 
@@ -217,6 +218,7 @@ def summary_detail_keyboard(*, summary_id: str | None = None) -> InlineKeyboardM
                 InlineKeyboardButton(text="Фото дня", callback_data=f"{prefix}:photos"),
             ],
             [InlineKeyboardButton(text="Сирі записи", callback_data=f"{prefix}:raw")],
+            [InlineKeyboardButton(text="Оновити підсумок", callback_data=f"{prefix}:refresh")],
             [InlineKeyboardButton(text="Головне меню", callback_data="nav:home")],
         ]
     )
@@ -239,6 +241,7 @@ def day_detail_keyboard(*, day_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Сирі записи", callback_data=f"{prefix}:raw"),
             ],
             [InlineKeyboardButton(text="Керувати записами", callback_data=f"{prefix}:entries")],
+            [InlineKeyboardButton(text="Оновити підсумок", callback_data=f"{prefix}:refresh")],
             [InlineKeyboardButton(text="Головне меню", callback_data="nav:home")],
         ]
     )

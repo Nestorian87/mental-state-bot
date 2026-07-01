@@ -84,7 +84,7 @@ class InteractionService:
             )
             await self._store_micro_summary(session, user=user, entry=entry, micro_summary=micro_summary.text)
             return InteractionResult(
-                replies=[BotReply(micro_summary.text, keyboard="correction")],
+                replies=[BotReply(micro_summary.text, keyboard=f"correction:{entry.id}")],
                 entry_id=entry.id,
                 snapshot_closed=True,
                 should_embed_entry=True,
@@ -187,7 +187,7 @@ class InteractionService:
         await self._store_micro_summary(session, user=user, entry=entry, micro_summary=micro_summary.text)
         await repo.close_snapshot(session, snapshot_id=open_snapshot.id)
         return InteractionResult(
-            replies=[BotReply(micro_summary.text, keyboard="correction")],
+            replies=[BotReply(micro_summary.text, keyboard=f"correction:{entry.id}")],
             entry_id=entry.id,
             snapshot_closed=True,
             should_embed_entry=True,
@@ -233,16 +233,21 @@ class InteractionService:
         correction_text: str,
         telegram_message_id: int | None,
         reply_to_message_id: int | None,
+        target_entry_id: uuid.UUID | None = None,
     ) -> InteractionResult:
-        recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=20)
-        target = next(
-            (
-                entry
-                for entry in reversed(recent_entries)
-                if entry.source not in {"correction", "profile_context_update"}
-            ),
-            None,
-        )
+        target = await repo.get_entry(session, entry_id=target_entry_id) if target_entry_id else None
+        if target is not None and target.user_id != user.id:
+            target = None
+        if target is None:
+            recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=20)
+            target = next(
+                (
+                    entry
+                    for entry in reversed(recent_entries)
+                    if entry.source not in {"correction", "profile_context_update"}
+                ),
+                None,
+            )
         if target is None:
             return InteractionResult(
                 replies=[BotReply("Не знайшов запис, який можна виправити.")],
@@ -311,6 +316,13 @@ class InteractionService:
                 uncertainty_notes=[],
                 model_run_id=None,
             )
+            if target.day_id is not None:
+                await repo.mark_day_summaries_stale(
+                    session,
+                    user_id=user.id,
+                    day_id=target.day_id,
+                    reason="entry_corrected",
+                )
         micro_summary, _ = await self.ai.generate_micro_summary(
             session,
             user_id=user.id,
@@ -331,7 +343,7 @@ class InteractionService:
         return InteractionResult(
             replies=[
                 BotReply(f"Оновив трактування для {target_note}."),
-                BotReply(micro_summary.text, keyboard="correction"),
+                BotReply(micro_summary.text, keyboard=f"correction:{target.id}"),
             ],
             entry_id=target.id,
             snapshot_closed=True,
