@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import mental_state_bot.services.summaries as summaries_module
 from mental_state_bot.services.review import format_period_summary
@@ -15,6 +16,7 @@ from mental_state_bot.services.summaries import (
     current_week_dates,
     previous_month_dates,
     previous_week_dates,
+    sleep_marker_target_date,
 )
 
 
@@ -50,6 +52,63 @@ def test_auto_morning_boundary_end_uses_next_local_midnight() -> None:
     ended_at = auto_morning_boundary_end(date(2026, 6, 28), "Europe/Kyiv")
 
     assert ended_at == datetime(2026, 6, 28, 21, 0, tzinfo=UTC)
+
+
+def test_sleep_marker_before_active_start_targets_previous_day() -> None:
+    sleep_time = datetime(2026, 7, 1, 1, 31, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+    assert sleep_marker_target_date(sleep_time, active_start="09:00") == date(2026, 6, 30)
+
+
+def test_sleep_marker_after_active_start_targets_current_day() -> None:
+    sleep_time = datetime(2026, 7, 1, 23, 31, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+    assert sleep_marker_target_date(sleep_time, active_start="09:00") == date(2026, 7, 1)
+
+
+async def test_sleep_summary_after_midnight_closes_previous_journal_day(monkeypatch) -> None:
+    class FakeSummaryService(SummaryService):
+        async def generate_day_summary(self, session, *, user, day, close_day=False):
+            assert day.local_date == date(2026, 6, 30)
+            assert close_day is True
+            return SimpleNamespace(short_text="Закрив вчора.")
+
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
+    day = SimpleNamespace(id=uuid4(), local_date=date(2026, 6, 30))
+    sleep_time = datetime(2026, 7, 1, 1, 31, tzinfo=ZoneInfo("Europe/Kyiv"))
+    calls = {"day_dates": [], "entries": []}
+
+    async def get_user_settings(session, user_id):
+        assert user_id == user.id
+        return SimpleNamespace(active_start="09:00")
+
+    async def get_or_create_day(session, *, user_id, local_date_value, started_at):
+        assert user_id == user.id
+        calls["day_dates"].append(local_date_value)
+        return day
+
+    async def add_entry(session, **kwargs):
+        calls["entries"].append(kwargs)
+        return SimpleNamespace(id=uuid4())
+
+    monkeypatch.setattr(summaries_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(summaries_module.repo, "get_or_create_day", get_or_create_day)
+    monkeypatch.setattr(summaries_module.repo, "add_entry", add_entry)
+    monkeypatch.setattr(summaries_module, "local_now", lambda timezone: sleep_time)
+    monkeypatch.setattr(summaries_module, "utc_now", lambda: datetime(2026, 6, 30, 22, 31, tzinfo=UTC))
+
+    service = FakeSummaryService(
+        SimpleNamespace(embeddings_enabled=False, embedding_api_key=None),
+        ai_service=None,
+    )
+
+    summary = await service.close_today_with_summary(object(), user=user)
+
+    assert summary.short_text == "Закрив вчора."
+    assert calls["day_dates"] == [date(2026, 6, 30)]
+    assert calls["entries"][0]["day_id"] == day.id
+    assert calls["entries"][0]["local_timestamp"] == sleep_time
+    assert calls["entries"][0]["meta"]["sleep_marker_target_date"] == "2026-06-30"
 
 
 async def test_yesterday_summary_auto_closes_uncertain_day(monkeypatch) -> None:

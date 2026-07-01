@@ -9,6 +9,7 @@ CUSTOM_INTERACTION_STYLE_KEY = "custom_interaction_style"
 USER_PROFILE_CONTEXT_KEY = "user_profile_context"
 PENDING_INPUT_KEY = "pending_input"
 PENDING_VOICE_TRANSCRIPT_KEY = "pending_voice_transcript"
+PENDING_MANUAL_ENTRY_KEY = "pending_manual_entry"
 PENDING_INPUT_KINDS = {
     "custom_style",
     "profile_context",
@@ -85,6 +86,26 @@ def settings_json_without_pending_input(settings: UserSettings) -> dict[str, Any
 def pending_voice_transcript(settings: UserSettings) -> dict[str, Any] | None:
     value = (getattr(settings, "settings_json", None) or {}).get(PENDING_VOICE_TRANSCRIPT_KEY)
     return value if isinstance(value, dict) else None
+
+
+def pending_manual_entry(settings: UserSettings) -> dict[str, Any] | None:
+    value = (getattr(settings, "settings_json", None) or {}).get(PENDING_MANUAL_ENTRY_KEY)
+    return value if isinstance(value, dict) else None
+
+
+def settings_json_with_pending_manual_entry(
+    settings: UserSettings,
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    current = dict(getattr(settings, "settings_json", None) or {})
+    current[PENDING_MANUAL_ENTRY_KEY] = entry
+    return current
+
+
+def settings_json_without_pending_manual_entry(settings: UserSettings) -> dict[str, Any]:
+    current = dict(getattr(settings, "settings_json", None) or {})
+    current.pop(PENDING_MANUAL_ENTRY_KEY, None)
+    return current
 
 
 def settings_json_with_pending_voice_transcript(

@@ -51,7 +51,7 @@ class InteractionService:
         style_context = _style_context(user_settings)
         open_snapshot = await repo.get_open_snapshot(session, user_id=user.id)
 
-        if open_snapshot is None:
+        if open_snapshot is None or source == "manual_confirmed":
             entry = await self._save_and_analyze_entry(
                 session,
                 user=user,

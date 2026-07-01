@@ -14,8 +14,10 @@ from mental_state_bot.bot.handlers import (
     _help_text,
     _is_previous_period_query,
     _is_sleep_marker_text,
+    _manual_entry_confirmation_text,
     _missed_reason_text,
     _parse_day_query,
+    _pending_manual_entry_payload,
     _pending_voice_note_payload,
     _split_telegram_text,
     _valid_hhmm,
@@ -26,8 +28,11 @@ from mental_state_bot.bot.keyboards import (
     data_menu_keyboard,
     day_detail_keyboard,
     day_menu_keyboard,
+    entry_delete_confirmation_keyboard,
+    entry_management_keyboard,
     main_menu_keyboard,
     main_reply_keyboard,
+    manual_entry_confirmation_keyboard,
     memory_menu_keyboard,
     missed_prompt_keyboard,
     period_detail_keyboard,
@@ -41,10 +46,13 @@ from mental_state_bot.bot.keyboards import (
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
     pending_input,
+    pending_manual_entry,
     pending_voice_transcript,
     settings_json_with_custom_interaction_style,
+    settings_json_with_pending_manual_entry,
     settings_json_with_pending_voice_transcript,
     settings_json_with_snapshot_pause,
+    settings_json_without_pending_manual_entry,
     settings_json_without_pending_voice_transcript,
     snapshots_paused,
 )
@@ -127,6 +135,18 @@ def test_voice_transcription_keyboard_exposes_confirm_fix_cancel() -> None:
     assert callbacks == {"voice:confirm", "voice:fix", "voice:cancel"}
 
 
+def test_manual_entry_confirmation_keyboard_exposes_save_and_ignore() -> None:
+    keyboard = manual_entry_confirmation_keyboard()
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert callbacks == {"manual:save", "manual:ignore"}
+
+
 def test_day_query_parses_explicit_dates() -> None:
     assert _parse_day_query("2026-06-30", "Europe/Kyiv") == date(2026, 6, 30)
     assert _parse_day_query("30.06.2026", "Europe/Kyiv") == date(2026, 6, 30)
@@ -161,6 +181,31 @@ def test_day_detail_keyboard_scopes_callbacks_to_day() -> None:
 
     assert f"dayview:{day_id}:story" in callbacks
     assert f"dayview:{day_id}:gaps" in callbacks
+    assert f"dayview:{day_id}:entries" in callbacks
+
+
+def test_entry_management_keyboards_require_confirmation() -> None:
+    entry_id = str(uuid4())
+    day_id = str(uuid4())
+    management = entry_management_keyboard(day_id=day_id, entries=[(entry_id, "1. 10:00 - текст")])
+    confirmation = entry_delete_confirmation_keyboard(entry_id=entry_id, day_id=day_id)
+    management_callbacks = {
+        button.callback_data
+        for row in management.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+    confirmation_callbacks = {
+        button.callback_data
+        for row in confirmation.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert f"entry:delete:{entry_id}" in management_callbacks
+    assert f"entry:confirm_delete:{entry_id}" not in management_callbacks
+    assert f"entry:confirm_delete:{entry_id}" in confirmation_callbacks
+    assert f"dayview:{day_id}:entries" in confirmation_callbacks
 
 
 def test_main_menu_groups_sections() -> None:
@@ -319,6 +364,32 @@ def test_voice_transcript_pending_state_roundtrip() -> None:
 
     assert pending_input(settings) is None
     assert pending_voice_transcript(settings) is None
+
+
+def test_manual_entry_pending_state_roundtrip() -> None:
+    settings = SimpleNamespace(settings_json={"other": "value"})
+    payload = {"text": "просто написав", "telegram_message_id": 42}
+
+    settings.settings_json = settings_json_with_pending_manual_entry(settings, payload)
+
+    assert pending_input(settings) is None
+    assert pending_manual_entry(settings) == payload
+
+    settings.settings_json = settings_json_without_pending_manual_entry(settings)
+
+    assert settings.settings_json == {"other": "value"}
+    assert pending_manual_entry(settings) is None
+
+
+def test_manual_entry_payload_and_confirmation_text() -> None:
+    message = SimpleNamespace(message_id=15, reply_to_message=None)
+    payload = _pending_manual_entry_payload(message, "  важливий момент  ")
+    text = _manual_entry_confirmation_text("важливий момент")
+
+    assert payload["text"] == "  важливий момент  "
+    assert payload["telegram_message_id"] == 15
+    assert "поза відкритим зрізом" in text
+    assert "важливий момент" in text
 
 
 def test_is_sleep_marker_text_matches_only_narrow_phrases() -> None:

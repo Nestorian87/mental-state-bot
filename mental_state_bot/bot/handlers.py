@@ -21,8 +21,11 @@ from mental_state_bot.bot.keyboards import (
     data_menu_keyboard,
     day_detail_keyboard,
     day_menu_keyboard,
+    entry_delete_confirmation_keyboard,
+    entry_management_keyboard,
     main_menu_keyboard,
     main_reply_keyboard,
+    manual_entry_confirmation_keyboard,
     memory_menu_keyboard,
     period_choice_keyboard,
     period_detail_keyboard,
@@ -39,7 +42,7 @@ from mental_state_bot.bot.keyboards import (
 )
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
-from mental_state_bot.db.models import Day, User, UserSettings
+from mental_state_bot.db.models import Day, Entry, User, UserSettings
 from mental_state_bot.services.analysis_backfill import backfill_entry_features
 from mental_state_bot.services.archive_audit import build_archive_audit, format_archive_audit
 from mental_state_bot.services.exports import export_user_archive
@@ -48,13 +51,16 @@ from mental_state_bot.services.memory import MemoryService
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
     pending_input,
+    pending_manual_entry,
     pending_voice_transcript,
     settings_json_with_custom_interaction_style,
     settings_json_with_pending_input,
+    settings_json_with_pending_manual_entry,
     settings_json_with_pending_voice_transcript,
     settings_json_with_snapshot_pause,
     settings_json_with_user_profile_context,
     settings_json_without_pending_input,
+    settings_json_without_pending_manual_entry,
     settings_json_without_pending_voice_transcript,
     snapshots_paused,
     user_profile_context,
@@ -1070,6 +1076,7 @@ async def day_detail_callback_handler(
     chart = None
     moments: list[PhotoMoment] = []
     reply_day_id = None
+    reply_markup = None
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
         day = await repo.get_day(session, day_id=day_id)
@@ -1077,12 +1084,20 @@ async def day_detail_callback_handler(
             text = "Не знайшов цей день в архіві."
         else:
             reply_day_id = str(day.id)
-            text, chart, moments = await _format_day_detail_section(session, user=user, day=day, section=section)
+            if section == "entries":
+                entries = list(await repo.list_day_entries(session, day_id=day.id))
+                text = _format_entry_management_view(entries, timezone=user.timezone)
+                reply_markup = entry_management_keyboard(
+                    day_id=str(day.id),
+                    entries=_entry_management_buttons(entries, timezone=user.timezone),
+                )
+            else:
+                text, chart, moments = await _format_day_detail_section(session, user=user, day=day, section=section)
     await callback.answer()
     await _answer_long_text(
         callback.message,
         text,
-        reply_markup=day_detail_keyboard(day_id=reply_day_id) if reply_day_id else None,
+        reply_markup=reply_markup or (day_detail_keyboard(day_id=reply_day_id) if reply_day_id else None),
     )
     if chart is not None:
         await callback.message.answer_photo(
@@ -1091,6 +1106,59 @@ async def day_detail_callback_handler(
         )
     if moments:
         await _send_photo_moments(callback.message, moments)
+
+
+@router.callback_query(F.data.startswith("entry:"))
+async def entry_management_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Не впізнав дію", show_alert=True)
+        return
+    action = parts[1]
+    entry_id = _uuid_or_none(parts[2])
+    if entry_id is None:
+        await callback.answer("Не можу прочитати запис", show_alert=True)
+        return
+
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        entry = await repo.get_entry(session, entry_id=entry_id)
+        if entry is None or entry.user_id != user.id:
+            text = "Не знайшов цей запис."
+            reply_markup = None
+        elif action == "delete":
+            day_id = str(entry.day_id) if entry.day_id else None
+            text = (
+                "Видалити цей запис?\n\n"
+                f"{_format_entry_delete_preview(entry, timezone=user.timezone)}\n\n"
+                "Це також прибере його AI-аналіз і embedding, щоб він не впливав на пам’ять та метрики."
+            )
+            reply_markup = entry_delete_confirmation_keyboard(entry_id=str(entry.id), day_id=day_id)
+        elif action == "confirm_delete":
+            day_id = str(entry.day_id) if entry.day_id else None
+            preview = _format_entry_delete_preview(entry, timezone=user.timezone)
+            should_reopen_day = entry.source == "sleep_marker" and entry.day_id is not None
+            deleted = await repo.delete_entry_tree(session, entry_id=entry.id, user_id=user.id)
+            if deleted is None:
+                text = "Не зміг видалити запис: він уже зник або не належить тобі."
+                reply_markup = None
+            else:
+                if should_reopen_day and deleted.day_id is not None:
+                    await repo.reopen_day(session, day_id=deleted.day_id)
+                text = f"Видалив запис:\n\n{preview}"
+                reply_markup = day_detail_keyboard(day_id=day_id) if day_id else main_menu_keyboard()
+        else:
+            await callback.answer("Не впізнав дію", show_alert=True)
+            return
+
+    await callback.answer()
+    await _edit_or_answer_menu(callback, text, reply_markup)
 
 
 @router.callback_query(F.data.startswith("summary:"))
@@ -1405,6 +1473,9 @@ async def voice_transcription_callback_handler(
     if not await _allowed_callback(callback, settings):
         return
     action = (callback.data or "").split(":", maxsplit=1)[1]
+    if action not in {"save", "ignore"}:
+        await callback.answer("Не впізнав дію", show_alert=True)
+        return
     entry_id: UUID | None = None
     should_embed = False
     replies: list[BotReply] = []
@@ -1457,6 +1528,62 @@ async def voice_transcription_callback_handler(
             reply.text,
             reply_markup=_inline_reply_keyboard(reply.keyboard) or fallback_markup,
         )
+    if should_embed and entry_id and user_id:
+        asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
+
+
+@router.callback_query(F.data.startswith("manual:"))
+async def manual_entry_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    interaction_service: InteractionService,
+    memory_service: MemoryService,
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    action = (callback.data or "").split(":", maxsplit=1)[1]
+    entry_id: UUID | None = None
+    should_embed = False
+    replies: list[BotReply] = []
+    user_id: UUID | None = None
+
+    await _clear_inline_keyboard(callback)
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        user_id = user.id
+        user_settings = await repo.get_user_settings(session, user.id)
+        pending = pending_manual_entry(user_settings)
+        await repo.update_user_settings(
+            session,
+            user_id=user.id,
+            values={"settings_json": settings_json_without_pending_manual_entry(user_settings)},
+        )
+        if pending is None:
+            replies = [BotReply("Не бачу непідтвердженого тексту.")]
+        elif action == "ignore":
+            replies = [BotReply("Ок, не записую це.")]
+        else:
+            text = str(pending.get("text") or "").strip()
+            if not text:
+                replies = [BotReply("Текст порожній, нічого не записую.")]
+            else:
+                async with _typing(callback.message):
+                    result = await interaction_service.handle_text_entry(
+                        session,
+                        user=user,
+                        text=text,
+                        telegram_message_id=_pending_int(pending.get("telegram_message_id")),
+                        reply_to_message_id=_pending_int(pending.get("reply_to_message_id")),
+                        source="manual_confirmed",
+                    )
+                entry_id = result.entry_id
+                should_embed = result.should_embed_entry
+                replies = result.replies
+
+    await callback.answer()
+    for reply in replies:
+        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
 
@@ -1598,6 +1725,7 @@ async def entry_handler(
                 replies = [BotReply(hint)]
         user_settings = await repo.get_user_settings(session, user.id)
         pending_kind = pending_input(user_settings)
+        manual_pending = pending_manual_entry(user_settings)
         if replies:
             pass
         elif pending_kind == "day_date" and not message.photo:
@@ -1672,18 +1800,55 @@ async def entry_handler(
             entry_id = result.entry_id
             should_embed = result.should_embed_entry
             replies = result.replies
-        else:
-            async with _typing(message, bot):
-                result = await interaction_service.handle_text_entry(
-                    session,
-                    user=user,
-                    text=text,
-                    telegram_message_id=message.message_id,
-                    reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None,
+        elif manual_pending and not message.photo:
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={
+                    "settings_json": settings_json_with_pending_manual_entry(
+                        user_settings,
+                        _pending_manual_entry_payload(message, text),
+                    )
+                },
+            )
+            replies = [
+                BotReply(
+                    "Оновив непідтверджений текст.\n\n"
+                    f"{_manual_entry_confirmation_text(text)}",
+                    keyboard="manual_entry_confirm",
                 )
-            entry_id = result.entry_id
-            should_embed = result.should_embed_entry
-            replies = result.replies
+            ]
+        else:
+            open_snapshot = await repo.get_open_snapshot(session, user_id=user.id)
+            if open_snapshot is None and not message.photo:
+                await repo.update_user_settings(
+                    session,
+                    user_id=user.id,
+                    values={
+                        "settings_json": settings_json_with_pending_manual_entry(
+                            user_settings,
+                            _pending_manual_entry_payload(message, text),
+                        )
+                    },
+                )
+                replies = [
+                    BotReply(
+                        _manual_entry_confirmation_text(text),
+                        keyboard="manual_entry_confirm",
+                    )
+                ]
+            else:
+                async with _typing(message, bot):
+                    result = await interaction_service.handle_text_entry(
+                        session,
+                        user=user,
+                        text=text,
+                        telegram_message_id=message.message_id,
+                        reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None,
+                    )
+                entry_id = result.entry_id
+                should_embed = result.should_embed_entry
+                replies = result.replies
             if message.photo and entry_id is not None:
                 await _store_photo(bot, settings, session, message, user.id, entry_id)
 
@@ -2327,6 +2492,8 @@ def _inline_reply_keyboard(kind: str | None):
         return correction_keyboard()
     if kind == "voice_transcript":
         return voice_transcription_keyboard()
+    if kind == "manual_entry_confirm":
+        return manual_entry_confirmation_keyboard()
     if kind == "sleep_confirm":
         return sleep_confirmation_keyboard()
     return None
@@ -2363,6 +2530,21 @@ def _prefixed_text(text: str, *, limit: int = 2000) -> str:
     return " ".join(value.split())[:limit]
 
 
+def _pending_manual_entry_payload(message: Message, text: str) -> dict[str, object]:
+    return {
+        "text": text,
+        "telegram_message_id": message.message_id,
+        "reply_to_message_id": message.reply_to_message.message_id if message.reply_to_message else None,
+    }
+
+
+def _manual_entry_confirmation_text(text: str) -> str:
+    return (
+        "Ти написав це поза відкритим зрізом. Що зробити?\n\n"
+        f"{_voice_transcription_preview(text, limit=500)}"
+    )
+
+
 def _truncate_setting(value: str, limit: int = 180) -> str:
     return _truncate_text(value, limit)
 
@@ -2376,6 +2558,36 @@ def _truncate_text(value: str, limit: int) -> str:
 def _is_sleep_marker_text(text: str) -> bool:
     normalized = " ".join(text.lower().split()).strip(" \t\r\n.,!?…")
     return normalized == SLEEP_MARKER_TEXT
+
+
+def _format_entry_management_view(entries: list[Entry], *, timezone: str) -> str:
+    if not entries:
+        return "У цьому дні немає записів для керування."
+    lines = [
+        "Керування записами",
+        "",
+        "Обери запис нижче, якщо треба видалити його з щоденника.",
+        "",
+    ]
+    for index, entry in enumerate(entries, start=1):
+        lines.append(f"{index}. {_format_entry_delete_preview(entry, timezone=timezone, limit=120)}")
+    return "\n".join(lines)
+
+
+def _entry_management_buttons(entries: list[Entry], *, timezone: str) -> list[tuple[str, str]]:
+    return [
+        (str(entry.id), f"{index}. {_format_entry_delete_preview(entry, timezone=timezone, limit=42)}")
+        for index, entry in enumerate(entries, start=1)
+    ]
+
+
+def _format_entry_delete_preview(entry: Entry, *, timezone: str, limit: int = 500) -> str:
+    timestamp = entry.local_timestamp or entry.created_at
+    time_text = "??:??"
+    if timestamp is not None:
+        time_text = timestamp.astimezone(zoneinfo(timezone)).strftime("%H:%M")
+    text = " ".join((entry.raw_text or "[без тексту]").split())
+    return f"{time_text} - {_truncate_text(text, limit)}"
 
 
 async def _format_day_detail_section(

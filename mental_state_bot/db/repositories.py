@@ -165,6 +165,14 @@ async def close_day(
     )
 
 
+async def reopen_day(session: AsyncSession, *, day_id: uuid.UUID) -> None:
+    await session.execute(
+        update(Day)
+        .where(Day.id == day_id)
+        .values(ended_at=None, boundary_kind="calendar", data_quality=None)
+    )
+
+
 async def create_snapshot(
     session: AsyncSession,
     *,
@@ -308,6 +316,22 @@ async def add_entry(
 
 async def get_entry(session: AsyncSession, *, entry_id: uuid.UUID) -> Entry | None:
     return await session.get(Entry, entry_id)
+
+
+async def delete_entry_tree(session: AsyncSession, *, entry_id: uuid.UUID, user_id: uuid.UUID) -> Entry | None:
+    entry = await session.get(Entry, entry_id)
+    if entry is None or entry.user_id != user_id:
+        return None
+    await session.execute(
+        delete(AIAnalysis).where(AIAnalysis.target_type == "entry", AIAnalysis.target_id == entry_id)
+    )
+    await session.execute(
+        delete(EmbeddingRecord).where(EmbeddingRecord.target_type == "entry", EmbeddingRecord.target_id == entry_id)
+    )
+    await session.execute(delete(Media).where(Media.entry_id == entry_id))
+    await session.delete(entry)
+    await session.flush()
+    return entry
 
 
 async def list_entries_by_ids(session: AsyncSession, *, entry_ids: Sequence[uuid.UUID]) -> Sequence[Entry]:

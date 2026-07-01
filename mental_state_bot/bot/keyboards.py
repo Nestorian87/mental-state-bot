@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -63,6 +65,15 @@ def voice_transcription_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Виправити текст", callback_data="voice:fix"),
                 InlineKeyboardButton(text="Скасувати", callback_data="voice:cancel"),
             ],
+        ]
+    )
+
+
+def manual_entry_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Записати як момент", callback_data="manual:save")],
+            [InlineKeyboardButton(text="Ігнорувати", callback_data="manual:ignore")],
         ]
     )
 
@@ -227,9 +238,28 @@ def day_detail_keyboard(*, day_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Прогалини", callback_data=f"{prefix}:gaps"),
                 InlineKeyboardButton(text="Сирі записи", callback_data=f"{prefix}:raw"),
             ],
+            [InlineKeyboardButton(text="Керувати записами", callback_data=f"{prefix}:entries")],
             [InlineKeyboardButton(text="Головне меню", callback_data="nav:home")],
         ]
     )
+
+
+def entry_management_keyboard(*, day_id: str, entries: Sequence[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"entry:delete:{entry_id}")]
+        for entry_id, label in entries
+    ]
+    rows.append([InlineKeyboardButton(text="Назад до дня", callback_data=f"dayview:{day_id}:timeline")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def entry_delete_confirmation_keyboard(*, entry_id: str, day_id: str | None = None) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="Так, видалити запис", callback_data=f"entry:confirm_delete:{entry_id}")]]
+    if day_id:
+        rows.append([InlineKeyboardButton(text="Скасувати", callback_data=f"dayview:{day_id}:entries")])
+    else:
+        rows.append([InlineKeyboardButton(text="Скасувати", callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def period_detail_keyboard(*, summary_id: str) -> InlineKeyboardMarkup:

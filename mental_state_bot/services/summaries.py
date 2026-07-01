@@ -14,7 +14,7 @@ from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, EmbeddingRecord, Entry, Summary, User
 from mental_state_bot.services.preferences import custom_interaction_style, user_profile_context
-from mental_state_bot.time_utils import local_date, local_now, utc_now, zoneinfo
+from mental_state_bot.time_utils import local_date, local_now, parse_hhmm, utc_now, zoneinfo
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +37,13 @@ class SummaryService:
         return await self.generate_day_summary(session, user=user, day=day)
 
     async def close_today_with_summary(self, session: AsyncSession, *, user: User) -> Summary:
+        user_settings = await repo.get_user_settings(session, user.id)
+        sleep_time = local_now(user.timezone)
+        target_date = sleep_marker_target_date(sleep_time, active_start=user_settings.active_start)
         day = await repo.get_or_create_day(
             session,
             user_id=user.id,
-            local_date_value=local_date(user.timezone),
+            local_date_value=target_date,
             started_at=utc_now(),
         )
         await repo.add_entry(
@@ -52,8 +55,11 @@ class SummaryService:
             raw_text="лягаю спати",
             telegram_message_id=None,
             reply_to_message_id=None,
-            local_timestamp=local_now(user.timezone),
-            meta={"boundary_kind": "sleep_marker"},
+            local_timestamp=sleep_time,
+            meta={
+                "boundary_kind": "sleep_marker",
+                "sleep_marker_target_date": target_date.isoformat(),
+            },
         )
         return await self.generate_day_summary(session, user=user, day=day, close_day=True)
 
@@ -518,6 +524,13 @@ def auto_morning_boundary_end(local_date_value: date, timezone: str) -> datetime
     tz = zoneinfo(timezone)
     next_midnight = datetime.combine(local_date_value + timedelta(days=1), time.min, tzinfo=tz)
     return next_midnight.astimezone(zoneinfo("UTC"))
+
+
+def sleep_marker_target_date(sleep_time: datetime, *, active_start: str) -> date:
+    target_date = sleep_time.date()
+    if sleep_time.time() < parse_hhmm(active_start):
+        return target_date - timedelta(days=1)
+    return target_date
 
 
 def _date_period_bounds(start_date: date, end_date: date, timezone: str) -> tuple[datetime, datetime]:
