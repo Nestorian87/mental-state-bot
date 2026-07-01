@@ -31,6 +31,7 @@ from mental_state_bot.bot.keyboards import (
     memory_menu_keyboard,
     missed_prompt_keyboard,
     period_detail_keyboard,
+    reanalysis_confirmation_keyboard,
     settings_capture_keyboard,
     settings_rhythm_keyboard,
     settings_style_keyboard,
@@ -198,6 +199,18 @@ def test_submenus_expose_grouped_actions() -> None:
     assert "menu:day:date" in day_callbacks
     assert "menu:memory:search" in memory_callbacks
     assert "archive:export_zip" in data_callbacks
+    assert "menu:data:reanalyze" in data_callbacks
+
+
+def test_reanalysis_confirmation_requires_explicit_confirm() -> None:
+    keyboard = reanalysis_confirmation_keyboard(limit=200)
+    buttons = [button for row in keyboard.inline_keyboard for button in row]
+    callbacks = {button.callback_data for button in buttons if button.callback_data}
+    labels = {button.text for button in buttons}
+
+    assert "features:reanalyze:200" in callbacks
+    assert "features:reanalyze:cancel" in callbacks
+    assert "Так, переаналізувати 200" in labels
 
 
 def test_period_detail_keyboard_scopes_callbacks_to_summary() -> None:

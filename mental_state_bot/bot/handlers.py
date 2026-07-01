@@ -26,6 +26,7 @@ from mental_state_bot.bot.keyboards import (
     memory_menu_keyboard,
     period_choice_keyboard,
     period_detail_keyboard,
+    reanalysis_confirmation_keyboard,
     settings_capture_keyboard,
     settings_keyboard,
     settings_rhythm_keyboard,
@@ -39,6 +40,7 @@ from mental_state_bot.bot.keyboards import (
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, User, UserSettings
+from mental_state_bot.services.analysis_backfill import backfill_entry_features
 from mental_state_bot.services.archive_audit import build_archive_audit, format_archive_audit
 from mental_state_bot.services.exports import export_user_archive
 from mental_state_bot.services.interactions import BotReply, InteractionResult, InteractionService
@@ -88,6 +90,8 @@ from mental_state_bot.services.summaries import SummaryService
 from mental_state_bot.time_utils import local_date, zoneinfo
 
 logger = logging.getLogger(__name__)
+
+FEATURE_REANALYSIS_LIMIT = 200
 router = Router()
 
 SLEEP_MARKER_TEXT = "лягаю спати"
@@ -873,6 +877,21 @@ async def menu_callback_handler(
         await _edit_or_answer_menu(callback, "Дані й архів.", data_menu_keyboard())
         return
 
+    if action == "menu:data:reanalyze":
+        await callback.answer()
+        text = (
+            "Переаналіз AI заново витягне метрики з останніх записів: настрій, енергію, стани, "
+            "активності й інші ознаки.\n\n"
+            "Це корисно після зміни промптів або якщо старі графіки мають багато порожніх точок. "
+            "Дія витрачає AI-запити й може тривати кілька хвилин."
+        )
+        await _edit_or_answer_menu(
+            callback,
+            text,
+            reanalysis_confirmation_keyboard(limit=FEATURE_REANALYSIS_LIMIT),
+        )
+        return
+
     if action in {"menu:day:today", "menu:day:yesterday"}:
         async with sessionmaker() as session, session.begin():
             user = await _get_or_create_callback_user(session, callback, settings)
@@ -1181,6 +1200,45 @@ async def audit_callback_handler(
         text = format_archive_audit(audit)
     await callback.answer()
     await _answer_long_text(callback.message, text)
+
+
+@router.callback_query(F.data.startswith("features:reanalyze:"))
+async def reanalyze_features_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    ai_service: AIService,
+    bot: Bot,
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    action = (callback.data or "").rsplit(":", maxsplit=1)[-1]
+    if action == "cancel":
+        await callback.answer("Скасовано")
+        await _edit_or_answer_menu(callback, "Ок, переаналіз не запускаю.", data_menu_keyboard())
+        return
+    try:
+        limit = max(1, min(int(action), 1000))
+    except ValueError:
+        await callback.answer("Не можу прочитати ліміт", show_alert=True)
+        return
+
+    await callback.answer("Запускаю переаналіз")
+    await _clear_inline_keyboard(callback)
+    await callback.message.answer(
+        f"Запустив переаналіз останніх {limit} записів. Напишу, коли буде готово."
+    )
+    asyncio.create_task(
+        _reanalyze_features_task(
+            bot=bot,
+            chat_id=callback.message.chat.id,
+            telegram_user_id=callback.from_user.id,
+            settings=settings,
+            sessionmaker=sessionmaker,
+            ai_service=ai_service,
+            limit=limit,
+        )
+    )
 
 
 @router.callback_query(F.data.startswith("settings:"))
@@ -2149,6 +2207,47 @@ async def _embed_entry_task(
         logger.exception("Background embedding task failed", extra={"entry_id": str(entry_id)})
 
 
+async def _reanalyze_features_task(
+    *,
+    bot: Bot,
+    chat_id: int,
+    telegram_user_id: int,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    ai_service: AIService,
+    limit: int,
+) -> None:
+    try:
+        result = await backfill_entry_features(
+            settings=settings,
+            ai_service=ai_service,
+            sessionmaker=sessionmaker,
+            telegram_user_id=telegram_user_id,
+            limit=limit,
+            force=True,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Background feature reanalysis task failed",
+            extra={"telegram_user_id": telegram_user_id, "limit": limit},
+        )
+        await bot.send_message(
+            chat_id,
+            "Переаналіз не завершився через помилку.\n\n"
+            f"Технічно: {_truncate_text(str(exc), 600)}",
+        )
+        return
+
+    await bot.send_message(
+        chat_id,
+        "Переаналіз AI завершено.\n"
+        f"Вибрано записів: {result.selected}\n"
+        f"Оброблено: {result.processed}\n"
+        f"Пропущено зниклих: {result.skipped_missing}\n\n"
+        "Тепер метрики й графіки для цих записів будуть будуватися на новішому аналізі.",
+    )
+
+
 async def _get_or_create_message_user(session: AsyncSession, message: Message, settings: Settings):
     return await repo.get_or_create_user(
         session,
@@ -2265,6 +2364,10 @@ def _prefixed_text(text: str, *, limit: int = 2000) -> str:
 
 
 def _truncate_setting(value: str, limit: int = 180) -> str:
+    return _truncate_text(value, limit)
+
+
+def _truncate_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 1].rstrip() + "…"

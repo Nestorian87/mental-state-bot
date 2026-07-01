@@ -175,7 +175,20 @@ def data_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="CSV", callback_data="archive:export_csv"),
                 InlineKeyboardButton(text="ZIP", callback_data="archive:export_zip"),
             ],
+            [InlineKeyboardButton(text="Переаналіз AI", callback_data="menu:data:reanalyze")],
             [InlineKeyboardButton(text="Головне меню", callback_data="menu:main")],
+        ]
+    )
+
+
+def reanalysis_confirmation_keyboard(*, limit: int = 200) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"Так, переаналізувати {limit}", callback_data=f"features:reanalyze:{limit}")],
+            [
+                InlineKeyboardButton(text="Скасувати", callback_data="features:reanalyze:cancel"),
+                InlineKeyboardButton(text="Назад до даних", callback_data="menu:data"),
+            ],
         ]
     )
 
