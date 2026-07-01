@@ -73,6 +73,64 @@ def test_format_similar_entries_empty() -> None:
     assert "поки не знайшов" in format_similar_entries([])
 
 
+def test_format_similar_entries_summarizes_memory_matches() -> None:
+    first_id = uuid4()
+    second_id = uuid4()
+    records = [
+        SimpleNamespace(
+            target_type="entry",
+            target_id=first_id,
+            source_text="Raw: Збираюся гуляти. Настрій змішаний.\nMicro-summary: прогулянка",
+            created_at=datetime(2026, 6, 30, 12, 0, tzinfo=UTC),
+        ),
+        SimpleNamespace(
+            target_type="entry",
+            target_id=second_id,
+            source_text="Raw: Вийшов пройтися й випити кави.",
+            created_at=datetime(2026, 6, 29, 12, 0, tzinfo=UTC),
+        ),
+    ]
+    entries = [
+        SimpleNamespace(
+            id=first_id,
+            local_timestamp=datetime(2026, 6, 30, 15, 0, tzinfo=UTC),
+            created_at=None,
+            raw_text="Збираюся гуляти. Настрій змішаний.",
+        ),
+        SimpleNamespace(
+            id=second_id,
+            local_timestamp=datetime(2026, 6, 29, 16, 0, tzinfo=UTC),
+            created_at=None,
+            raw_text="Вийшов пройтися й випити кави.",
+        ),
+    ]
+    analyses = [
+        SimpleNamespace(
+            task_name="extract_entry_features",
+            target_id=first_id,
+            result={"activity_labels": ["прогулянка"], "state_labels": ["змішаний стан"]},
+        ),
+        SimpleNamespace(
+            task_name="extract_entry_features",
+            target_id=second_id,
+            result={"activity_labels": ["прогулянка"], "state_labels": ["спокій"]},
+        ),
+    ]
+
+    text = format_similar_entries(
+        records,
+        query="гуляю",
+        entries=entries,
+        analyses=analyses,
+        timezone="Europe/Kyiv",
+    )
+
+    assert "Пам’ять за запитом: «гуляю»" in text
+    assert "Що може повторюватися" in text
+    assert "прогулянка (2)" in text
+    assert "Відкрити день: /day 2026-06-30" in text
+
+
 def test_feature_score_maps_common_values() -> None:
     assert _feature_score({"value": "very_low"}) == 1
     assert _feature_score({"value": "neutral"}) == 4

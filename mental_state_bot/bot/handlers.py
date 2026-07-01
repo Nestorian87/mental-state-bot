@@ -413,7 +413,17 @@ async def similar_command_handler(
         user = await _get_or_create_message_user(session, message, settings)
         async with _typing(message):
             records = await memory_service.similar_entries(session, user_id=user.id, query_text=query, limit=6)
-        text = format_similar_entries(list(records))
+        records = list(records)
+        entry_ids = [record.target_id for record in records if record.target_type == "entry"]
+        entries = list(await repo.list_entries_by_ids(session, entry_ids=entry_ids))
+        analyses = list(await repo.list_analyses_for_targets(session, target_type="entry", target_ids=entry_ids))
+        text = format_similar_entries(
+            records,
+            query=query,
+            entries=entries,
+            analyses=analyses,
+            timezone=user.timezone,
+        )
     await _answer_long_text(message, text)
 
 

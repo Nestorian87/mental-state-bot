@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import struct
 import zlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
 from decimal import Decimal
@@ -595,14 +595,58 @@ async def format_cost_report(session: AsyncSession, *, user: User, days: int = 7
     return "\n".join(lines)
 
 
-def format_similar_entries(records: list[EmbeddingRecord]) -> str:
+def format_similar_entries(
+    records: list[EmbeddingRecord],
+    *,
+    query: str | None = None,
+    entries: list[Entry] | None = None,
+    analyses=None,
+    timezone: str | None = None,
+    limit: int = 5,
+) -> str:
     if not records:
         return "Схожих записів поки не знайшов. Можливо, ще немає embeddings або даних замало."
 
-    lines = ["Схожі моменти:"]
-    for index, record in enumerate(records, start=1):
-        source = _truncate(record.source_text.replace("\n", " "), 260)
-        lines.append(f"{index}. {record.created_at.strftime('%Y-%m-%d %H:%M')} - {source}")
+    entries_by_id = {str(entry.id): entry for entry in entries or []}
+    features_by_entry = _latest_feature_results_by_entry(analyses or [])
+    selected_records = _diverse_similar_records(
+        records,
+        entries_by_id=entries_by_id,
+        timezone=timezone,
+        limit=limit,
+    )
+    selected_entry_ids = [str(record.target_id) for record in selected_records]
+    activity_counts, state_counts = _similar_label_counts(selected_entry_ids, features_by_entry)
+    day_counts = _similar_day_counts(selected_records, entries_by_id=entries_by_id, timezone=timezone)
+
+    title = f"Пам’ять за запитом: «{_truncate(query, 80)}»" if query else "Схожі моменти з пам’яті"
+    lines = [
+        title,
+        f"Знайшов {len(records)} схожих моментів. Показую {len(selected_records)} найкорисніших для згадування.",
+        "",
+    ]
+    pattern_lines = []
+    if state_counts:
+        pattern_lines.append("Стани: " + _inline_counts(state_counts, limit=4))
+    if activity_counts:
+        pattern_lines.append("Активності: " + _inline_counts(activity_counts, limit=4))
+    if day_counts:
+        pattern_lines.append("Дати: " + _inline_counts(day_counts, limit=4))
+    if pattern_lines:
+        lines.extend(["Що може повторюватися:", *[f"- {line}" for line in pattern_lines], ""])
+
+    lines.append("Приклади:")
+    for index, record in enumerate(selected_records, start=1):
+        entry = entries_by_id.get(str(record.target_id))
+        timestamp = _similar_timestamp(record, entry, timezone)
+        date_text = timestamp.strftime("%Y-%m-%d") if timestamp else "дата невідома"
+        time_text = timestamp.strftime("%H:%M") if timestamp else "??:??"
+        text = _similar_record_text(record, entry)
+        labels = _similar_labels(features_by_entry.get(str(record.target_id), {}))
+        label_text = f"\n   Мітки: {', '.join(labels[:4])}" if labels else ""
+        lines.append(f"{index}. {date_text} {time_text} — {_truncate(text, 170)}{label_text}")
+        if timestamp:
+            lines.append(f"   Відкрити день: /day {date_text}")
     return "\n".join(lines)
 
 
@@ -999,6 +1043,105 @@ def _rounded_average(values: list[int]) -> int | None:
 
 def _period_title(summary: Summary) -> str:
     return "Тижневий підсумок" if summary.period_type == "weekly" else "Місячний підсумок"
+
+
+def _diverse_similar_records(
+    records: list[EmbeddingRecord],
+    *,
+    entries_by_id: dict[str, Entry],
+    timezone: str | None,
+    limit: int,
+) -> list[EmbeddingRecord]:
+    selected: list[EmbeddingRecord] = []
+    seen_dates: set[date] = set()
+    for record in records:
+        timestamp = _similar_timestamp(record, entries_by_id.get(str(record.target_id)), timezone)
+        record_date = timestamp.date() if timestamp else None
+        if record_date is not None and record_date in seen_dates:
+            continue
+        selected.append(record)
+        if record_date is not None:
+            seen_dates.add(record_date)
+        if len(selected) >= limit:
+            return selected
+    for record in records:
+        if record not in selected:
+            selected.append(record)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _similar_timestamp(record: EmbeddingRecord, entry: Entry | None, timezone: str | None) -> datetime | None:
+    timestamp = (entry.local_timestamp or entry.created_at) if entry is not None else record.created_at
+    return _timestamp_in_timezone(timestamp, zoneinfo(timezone)) if timezone else timestamp
+
+
+def _similar_record_text(record: EmbeddingRecord, entry: Entry | None) -> str:
+    if entry is not None and entry.raw_text:
+        return entry.raw_text
+    raw = _semantic_field(record.source_text, "Raw:")
+    if raw:
+        return raw
+    summary = _semantic_field(record.source_text, "Micro-summary:")
+    if summary:
+        return summary
+    return record.source_text.replace("\n", " ")
+
+
+def _semantic_field(text: str, prefix: str) -> str | None:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith(prefix):
+            continue
+        value_lines = [line[len(prefix) :].strip()]
+        for next_line in lines[index + 1 :]:
+            if next_line.startswith(("Raw:", "Features:", "Micro-summary:")):
+                break
+            value_lines.append(next_line.strip())
+        value = " ".join(part for part in value_lines if part)
+        return value or None
+    return None
+
+
+def _similar_label_counts(
+    entry_ids: list[str], features_by_entry: dict[str, dict[str, Any]]
+) -> tuple[Counter[str], Counter[str]]:
+    activity_counts: Counter[str] = Counter()
+    state_counts: Counter[str] = Counter()
+    for entry_id in entry_ids:
+        result = features_by_entry.get(entry_id, {})
+        for label in result.get("activity_labels") or []:
+            if label_text := _metrics_label_text(label):
+                activity_counts[label_text] += 1
+        for label in result.get("state_labels") or []:
+            if label_text := _metrics_label_text(label):
+                state_counts[label_text] += 1
+    return activity_counts, state_counts
+
+
+def _similar_day_counts(
+    records: list[EmbeddingRecord], *, entries_by_id: dict[str, Entry], timezone: str | None
+) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for record in records:
+        timestamp = _similar_timestamp(record, entries_by_id.get(str(record.target_id)), timezone)
+        if timestamp is not None:
+            counts[timestamp.strftime("%Y-%m-%d")] += 1
+    return counts
+
+
+def _similar_labels(result: dict[str, Any]) -> list[str]:
+    labels = []
+    for label in [*(result.get("state_labels") or []), *(result.get("activity_labels") or [])]:
+        label_text = _metrics_label_text(label)
+        if label_text and label_text not in labels:
+            labels.append(label_text)
+    return labels
+
+
+def _inline_counts(counts: Counter[str], *, limit: int = 4) -> str:
+    return ", ".join(f"{label} ({count})" for label, count in counts.most_common(limit))
 
 
 def _list_block(title: str, items: list[str]) -> str:

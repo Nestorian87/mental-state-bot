@@ -310,6 +310,13 @@ async def get_entry(session: AsyncSession, *, entry_id: uuid.UUID) -> Entry | No
     return await session.get(Entry, entry_id)
 
 
+async def list_entries_by_ids(session: AsyncSession, *, entry_ids: Sequence[uuid.UUID]) -> Sequence[Entry]:
+    if not entry_ids:
+        return []
+    result = await session.execute(select(Entry).where(Entry.id.in_(entry_ids)))
+    return result.scalars().all()
+
+
 async def add_media(
     session: AsyncSession,
     *,
