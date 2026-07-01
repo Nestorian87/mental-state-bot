@@ -11,10 +11,13 @@ PENDING_INPUT_KEY = "pending_input"
 PENDING_VOICE_TRANSCRIPT_KEY = "pending_voice_transcript"
 PENDING_MANUAL_ENTRY_KEY = "pending_manual_entry"
 PENDING_CORRECTION_ENTRY_ID_KEY = "pending_correction_entry_id"
+LIFE_CONTEXT_ITEMS_KEY = "life_context_items"
+PENDING_LIFE_CONTEXT_REVIEW_KEY = "pending_life_context_review"
 PENDING_INPUT_KINDS = {
     "custom_style",
     "profile_context",
     "correction",
+    "life_context_free_answer",
     "voice_transcript",
     "voice_transcript_fix",
 }
@@ -59,6 +62,37 @@ def settings_json_with_user_profile_context(settings: UserSettings, context: str
         current.pop(USER_PROFILE_CONTEXT_KEY, None)
         return current
     current[USER_PROFILE_CONTEXT_KEY] = " ".join(context.split())[:2000]
+    return current
+
+
+def life_context_items(settings: UserSettings) -> list[dict[str, Any]]:
+    value = (getattr(settings, "settings_json", None) or {}).get(LIFE_CONTEXT_ITEMS_KEY)
+    return value if isinstance(value, list) else []
+
+
+def pending_life_context_review(settings: UserSettings) -> dict[str, Any] | None:
+    value = (getattr(settings, "settings_json", None) or {}).get(PENDING_LIFE_CONTEXT_REVIEW_KEY)
+    return value if isinstance(value, dict) else None
+
+
+def settings_json_with_life_context_items(
+    settings: UserSettings,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    current = dict(getattr(settings, "settings_json", None) or {})
+    current[LIFE_CONTEXT_ITEMS_KEY] = items[:80]
+    return current
+
+
+def settings_json_with_pending_life_context_review(
+    settings: UserSettings,
+    review: dict[str, Any] | None,
+) -> dict[str, Any]:
+    current = dict(getattr(settings, "settings_json", None) or {})
+    if review is None:
+        current.pop(PENDING_LIFE_CONTEXT_REVIEW_KEY, None)
+    else:
+        current[PENDING_LIFE_CONTEXT_REVIEW_KEY] = review
     return current
 
 

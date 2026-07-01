@@ -12,7 +12,11 @@ from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, Entry, Snapshot, User, UserSettings
 from mental_state_bot.services.analysis_backfill import analyze_entry_features
-from mental_state_bot.services.preferences import custom_interaction_style, user_profile_context
+from mental_state_bot.services.preferences import (
+    custom_interaction_style,
+    life_context_items,
+    user_profile_context,
+)
 from mental_state_bot.services.semantic_context import semantic_memory_context
 from mental_state_bot.time_utils import local_date, local_now, utc_now
 
@@ -636,10 +640,11 @@ def _live_query_text(
     return " ".join(part for part in [day_tail, transcript_tail, text] if part).strip()
 
 
-def _style_context(settings: UserSettings) -> dict[str, str | None]:
+def _style_context(settings: UserSettings) -> dict[str, Any]:
     return {
         "tone": settings.tone,
         "humanity_level": settings.humanity_level,
         "custom_interaction_style": custom_interaction_style(settings),
         "user_profile_context": user_profile_context(settings),
+        "life_context": life_context_items(settings)[-40:],
     }

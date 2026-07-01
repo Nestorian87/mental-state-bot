@@ -14,6 +14,7 @@ from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, Snapshot, User, UserSettings
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
+    life_context_items,
     snapshots_paused,
     user_profile_context,
 )
@@ -200,6 +201,7 @@ def snapshot_question_context(
             "tone": user_settings.tone,
             "humanity_level": user_settings.humanity_level,
             "custom_interaction_style": custom_interaction_style(user_settings),
+            "life_context": life_context_items(user_settings)[-40:],
         },
         "user_profile_context": user_profile_context(user_settings),
         "question_preferences": {

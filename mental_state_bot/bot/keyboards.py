@@ -111,10 +111,13 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="Пам’ять", callback_data="menu:memory"),
-                InlineKeyboardButton(text="Дані", callback_data="menu:data"),
+                InlineKeyboardButton(text="Живий контекст", callback_data="menu:life_context"),
             ],
             [
+                InlineKeyboardButton(text="Дані", callback_data="menu:data"),
                 InlineKeyboardButton(text="Налаштування", callback_data="settings:open"),
+            ],
+            [
                 InlineKeyboardButton(text="Новий зріз", callback_data="snapshot:new"),
             ],
         ]
@@ -254,6 +257,61 @@ def entry_management_keyboard(*, day_id: str, entries: Sequence[tuple[str, str]]
     ]
     rows.append([InlineKeyboardButton(text="Назад до дня", callback_data=f"dayview:{day_id}:timeline")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def life_context_menu_keyboard(*, has_items: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Знайти припущення", callback_data="life_context:scan")],
+    ]
+    if has_items:
+        rows.append([InlineKeyboardButton(text="Показати живий контекст", callback_data="life_context:list")])
+    rows.append([InlineKeyboardButton(text="Головне меню", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def life_context_offer_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Так, перевірити", callback_data="life_context:review:start")],
+            [
+                InlineKeyboardButton(text="Пізніше", callback_data="life_context:review:later"),
+                InlineKeyboardButton(text="Не зараз", callback_data="life_context:review:stop"),
+            ],
+        ]
+    )
+
+
+def life_context_question_keyboard(candidate: dict) -> InlineKeyboardMarkup:
+    options = [str(option) for option in candidate.get("options") or [] if str(option).strip()]
+    rows = []
+    for index, option in enumerate(options[:5]):
+        rows.append([InlineKeyboardButton(text=option[:64], callback_data=f"life_context:answer:option:{index}")])
+    if not rows and candidate.get("question_type") == "confirm":
+        rows.append(
+            [
+                InlineKeyboardButton(text="Так", callback_data="life_context:answer:yes"),
+                InlineKeyboardButton(text="Не зовсім", callback_data="life_context:answer:free"),
+                InlineKeyboardButton(text="Ні", callback_data="life_context:answer:no"),
+            ]
+        )
+    else:
+        rows.append([InlineKeyboardButton(text="Поясню словами", callback_data="life_context:answer:free")])
+    rows.append(
+        [
+            InlineKeyboardButton(text="Пропустити", callback_data="life_context:answer:skip"),
+            InlineKeyboardButton(text="Зупинити", callback_data="life_context:answer:stop"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def life_context_continue_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Продовжити перевірку", callback_data="life_context:review:next")],
+            [InlineKeyboardButton(text="Зупинити", callback_data="life_context:answer:stop")],
+        ]
+    )
 
 
 def entry_delete_confirmation_keyboard(*, entry_id: str, day_id: str | None = None) -> InlineKeyboardMarkup:

@@ -23,6 +23,10 @@ from mental_state_bot.bot.keyboards import (
     day_menu_keyboard,
     entry_delete_confirmation_keyboard,
     entry_management_keyboard,
+    life_context_continue_keyboard,
+    life_context_menu_keyboard,
+    life_context_offer_keyboard,
+    life_context_question_keyboard,
     main_menu_keyboard,
     main_reply_keyboard,
     manual_entry_confirmation_keyboard,
@@ -47,15 +51,25 @@ from mental_state_bot.services.analysis_backfill import backfill_entry_features
 from mental_state_bot.services.archive_audit import build_archive_audit, format_archive_audit
 from mental_state_bot.services.exports import export_user_archive
 from mental_state_bot.services.interactions import BotReply, InteractionResult, InteractionService
+from mental_state_bot.services.life_context import (
+    answer_life_context_candidate,
+    current_life_context_candidate,
+    format_life_context_items,
+    format_life_context_question,
+    start_life_context_review,
+)
 from mental_state_bot.services.memory import MemoryService
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
+    life_context_items,
     pending_correction_entry_id,
     pending_input,
+    pending_life_context_review,
     pending_manual_entry,
     pending_voice_transcript,
     settings_json_with_custom_interaction_style,
     settings_json_with_pending_input,
+    settings_json_with_pending_life_context_review,
     settings_json_with_pending_manual_entry,
     settings_json_with_pending_voice_transcript,
     settings_json_with_snapshot_pause,
@@ -858,6 +872,7 @@ async def menu_callback_handler(
     sessionmaker: async_sessionmaker[AsyncSession],
     summary_service: SummaryService,
     memory_service: MemoryService,
+    ai_service: AIService,
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
@@ -888,6 +903,18 @@ async def menu_callback_handler(
             callback,
             "Пам’ять.",
             memory_menu_keyboard(embeddings_enabled=_embeddings_ready(settings)),
+        )
+        return
+    if action == "menu:life_context":
+        async with sessionmaker() as session, session.begin():
+            user = await _get_or_create_callback_user(session, callback, settings)
+            user_settings = await repo.get_user_settings(session, user.id)
+            has_items = bool(life_context_items(user_settings))
+        await callback.answer()
+        await _edit_or_answer_menu(
+            callback,
+            "Живий контекст. Це окрема обережна пам’ять про людей, місця, проєкти, рутини й назви, які краще не плутати.",
+            life_context_menu_keyboard(has_items=has_items),
         )
         return
     if action == "menu:data":
@@ -1019,6 +1046,97 @@ async def menu_callback_handler(
         return
 
     await callback.answer("Не впізнав дію", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("life_context:"))
+async def life_context_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    ai_service: AIService,
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    action = callback.data or ""
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        user_settings = await repo.get_user_settings(session, user.id)
+        if action == "life_context:list":
+            text = format_life_context_items(life_context_items(user_settings))
+            keyboard = life_context_menu_keyboard(has_items=bool(life_context_items(user_settings)))
+        elif action == "life_context:scan":
+            async with _typing(callback.message):
+                lead_text, review = await start_life_context_review(
+                    session,
+                    user=user,
+                    user_settings=user_settings,
+                    ai_service=ai_service,
+            )
+            if review:
+                text = f"{lead_text}\n\nМожемо швидко пройти 1-3 питання. Якщо не хочеться зараз, можна відкласти."
+                keyboard = life_context_offer_keyboard()
+            else:
+                text = lead_text
+                keyboard = life_context_menu_keyboard(has_items=bool(life_context_items(user_settings)))
+        elif action in {"life_context:review:start", "life_context:review:next"}:
+            review = pending_life_context_review(user_settings)
+            candidate = current_life_context_candidate(review)
+            if candidate is None:
+                text = "Не бачу активних припущень для перевірки."
+                keyboard = life_context_menu_keyboard(has_items=bool(life_context_items(user_settings)))
+            else:
+                text = format_life_context_question(review or {})
+                keyboard = life_context_question_keyboard(candidate)
+        elif action == "life_context:review:later":
+            text = "Ок, залишив ці припущення на потім."
+            keyboard = life_context_continue_keyboard()
+        elif action == "life_context:review:stop":
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={"settings_json": settings_json_with_pending_life_context_review(user_settings, None)},
+            )
+            text = "Ок, не перевіряю це зараз."
+            keyboard = life_context_menu_keyboard(has_items=bool(life_context_items(user_settings)))
+        elif action.startswith("life_context:answer:"):
+            answer_kind = _life_context_answer_kind(action)
+            review = pending_life_context_review(user_settings)
+            candidate = current_life_context_candidate(review)
+            if candidate is None:
+                text = "Не бачу активного питання про живий контекст."
+                keyboard = life_context_menu_keyboard(has_items=bool(life_context_items(user_settings)))
+            elif answer_kind == "free":
+                await repo.update_user_settings(
+                    session,
+                    user_id=user.id,
+                    values={"settings_json": settings_json_with_pending_input(user_settings, "life_context_free_answer")},
+                )
+                await callback.answer()
+                await _clear_inline_keyboard(callback)
+                await callback.message.answer(
+                    "Напиши наступним повідомленням, як це краще запам’ятати в живому контексті.",
+                    reply_markup=main_reply_keyboard("Поясни контекст своїми словами"),
+                )
+                return
+            else:
+                answer = _life_context_answer_from_callback(action, candidate)
+                text, next_review = await answer_life_context_candidate(
+                    session,
+                    user=user,
+                    user_settings=user_settings,
+                    answer=answer,
+                    answer_kind=answer_kind,
+                )
+                if next_review:
+                    text = f"{text}\n\n{format_life_context_question(next_review)}"
+                    keyboard = life_context_question_keyboard(current_life_context_candidate(next_review) or {})
+                else:
+                    keyboard = life_context_menu_keyboard(has_items=True)
+        else:
+            text = "Не впізнав дію живого контексту."
+            keyboard = life_context_menu_keyboard(has_items=bool(life_context_items(user_settings)))
+    await callback.answer()
+    await _edit_or_answer_menu(callback, text, keyboard)
 
 
 @router.callback_query(F.data == "day:today")
@@ -2067,6 +2185,28 @@ async def _handle_pending_input(
             ],
             snapshot_closed=True,
         )
+    if pending_kind == "life_context_free_answer":
+        user_settings = await repo.update_user_settings(
+            session,
+            user_id=user.id,
+            values={"settings_json": settings_json_without_pending_input(user_settings)},
+        )
+        answer_text, next_review = await answer_life_context_candidate(
+            session,
+            user=user,
+            user_settings=user_settings,
+            answer=text,
+            answer_kind="free",
+        )
+        replies = [BotReply(answer_text)]
+        if next_review:
+            replies.append(
+                BotReply(
+                    "Є ще одне припущення для перевірки.",
+                    keyboard="life_context_continue",
+                )
+            )
+        return InteractionResult(replies=replies, snapshot_closed=True)
     if pending_kind == "correction":
         target_entry_id = _uuid_or_none(pending_correction_entry_id(user_settings))
         await repo.update_user_settings(
@@ -2564,6 +2704,8 @@ def _inline_reply_keyboard(kind: str | None):
         return manual_entry_confirmation_keyboard()
     if kind == "sleep_confirm":
         return sleep_confirmation_keyboard()
+    if kind == "life_context_continue":
+        return life_context_continue_keyboard()
     return None
 
 
@@ -2572,6 +2714,33 @@ def _correction_target_from_callback(callback_data: str) -> UUID | None:
     if len(parts) != 3:
         return None
     return _uuid_or_none(parts[2])
+
+
+def _life_context_answer_kind(callback_data: str) -> str:
+    parts = callback_data.split(":")
+    if len(parts) >= 4 and parts[2] == "option":
+        return "option"
+    return parts[-1] if parts else ""
+
+
+def _life_context_answer_from_callback(callback_data: str, candidate: dict) -> str:
+    parts = callback_data.split(":")
+    if len(parts) >= 4 and parts[2] == "option":
+        try:
+            index = int(parts[3])
+        except ValueError:
+            return ""
+        options = [str(option) for option in candidate.get("options") or []]
+        if 0 <= index < len(options):
+            return options[index]
+        return ""
+    action = parts[-1] if parts else ""
+    return {
+        "yes": "Так, це правильно.",
+        "no": "Ні, це не варто так запам’ятовувати.",
+        "skip": "",
+        "stop": "",
+    }.get(action, "")
 
 
 def _without_pending(settings_json: dict) -> dict:

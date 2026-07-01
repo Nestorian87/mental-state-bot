@@ -50,10 +50,12 @@ from mental_state_bot.services.preferences import (
     custom_interaction_style,
     pending_correction_entry_id,
     pending_input,
+    pending_life_context_review,
     pending_manual_entry,
     pending_voice_transcript,
     settings_json_with_custom_interaction_style,
     settings_json_with_pending_correction_entry_id,
+    settings_json_with_pending_life_context_review,
     settings_json_with_pending_manual_entry,
     settings_json_with_pending_voice_transcript,
     settings_json_with_snapshot_pause,
@@ -207,6 +209,18 @@ def test_correction_keyboard_can_target_entry() -> None:
     assert callbacks == {f"correction:start:{entry_id}"}
 
 
+def test_life_context_pending_review_roundtrip() -> None:
+    settings = SimpleNamespace(settings_json={})
+    review = {"index": 0, "candidates": [{"label": "Альбом"}]}
+    settings.settings_json = settings_json_with_pending_life_context_review(settings, review)
+
+    assert pending_life_context_review(settings) == review
+
+    settings.settings_json = settings_json_with_pending_life_context_review(settings, None)
+
+    assert pending_life_context_review(settings) is None
+
+
 def test_entry_management_keyboards_require_confirmation() -> None:
     entry_id = str(uuid4())
     day_id = str(uuid4())
@@ -240,8 +254,8 @@ def test_main_menu_groups_sections() -> None:
         if button.callback_data
     }
 
-    assert {"menu:day", "menu:summaries", "menu:memory", "menu:data", "settings:open"} <= callbacks
-    assert len(keyboard.inline_keyboard) == 3
+    assert {"menu:day", "menu:summaries", "menu:memory", "menu:life_context", "menu:data", "settings:open"} <= callbacks
+    assert len(keyboard.inline_keyboard) == 4
 
 
 def test_submenus_expose_grouped_actions() -> None:

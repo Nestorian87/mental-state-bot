@@ -16,6 +16,7 @@ from mental_state_bot.ai.prompts import (
     CLARIFICATION_PROMPT,
     DAILY_SUMMARY_PROMPT,
     EXTRACTION_PROMPT,
+    LIFE_CONTEXT_PROMPT,
     MICRO_SUMMARY_PROMPT,
     MONTHLY_SUMMARY_PROMPT,
     QUESTION_PROMPT,
@@ -27,6 +28,7 @@ from mental_state_bot.ai.schemas import (
     ClarificationResult,
     DailySummary,
     EntryFeatures,
+    LifeContextExtraction,
     MicroSummary,
     ModelCallResult,
     PeriodSummary,
@@ -192,6 +194,31 @@ class AIService:
             schema_model=SemanticMemoryText,
             system=SYSTEM_STYLE,
             prompt=SEMANTIC_MEMORY_PROMPT,
+            payload=context,
+            fallback=fallback,
+        )
+
+    async def extract_life_context_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        context: dict[str, Any],
+    ) -> tuple[LifeContextExtraction, UUID | None]:
+        route = Route(
+            model=self.settings.ai_live_model,
+            thinking=False,
+            temperature=0.15,
+        )
+        fallback = LifeContextExtraction(candidates=[])
+        return await self._json_task(
+            session,
+            user_id=user_id,
+            task_name="extract_life_context_candidates",
+            route=route,
+            schema_model=LifeContextExtraction,
+            system=SYSTEM_STYLE,
+            prompt=LIFE_CONTEXT_PROMPT,
             payload=context,
             fallback=fallback,
         )

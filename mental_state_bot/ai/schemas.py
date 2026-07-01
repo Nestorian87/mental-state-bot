@@ -79,6 +79,22 @@ class SemanticMemoryText(BaseModel):
     text: str
 
 
+class LifeContextCandidate(BaseModel):
+    category: Literal["person", "place", "project", "routine", "theme", "term", "other"] = "other"
+    label: str
+    hypothesis: str
+    question: str
+    question_type: Literal["confirm", "choice", "open", "boundary", "status", "meaning"] = "open"
+    options: list[str] = Field(default_factory=list)
+    why_it_matters: str | None = None
+    sensitivity: Literal["normal", "sensitive"] = "normal"
+    confidence: float = Field(default=0.5, ge=0, le=1)
+
+
+class LifeContextExtraction(BaseModel):
+    candidates: list[LifeContextCandidate] = Field(default_factory=list)
+
+
 class DailySummary(BaseModel):
     short_text: str
     story: str
