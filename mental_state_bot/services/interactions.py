@@ -102,7 +102,13 @@ class InteractionService:
             source="snapshot_response",
         )
 
-        if await self._should_clarify(session, snapshot=open_snapshot, text=text, entry=entry):
+        should_clarify, clarification_need = await self._clarification_need(
+            session,
+            snapshot=open_snapshot,
+            text=text,
+            entry=entry,
+        )
+        if should_clarify:
             recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=5)
             snapshot_conversation = await _snapshot_conversation_context(session, snapshot=open_snapshot)
             day_context = await _day_context(session, day=day)
@@ -130,6 +136,7 @@ class InteractionService:
                     "day_context": day_context,
                     "semantic_memory": semantic_memory,
                     "style": style_context,
+                    "clarification_need": clarification_need,
                 },
             )
             await repo.increment_clarification_count(session, snapshot_id=open_snapshot.id)
@@ -456,25 +463,45 @@ class InteractionService:
             model_run_id=None,
         )
 
-    async def _should_clarify(
+    async def _clarification_need(
         self,
         session: AsyncSession,
         *,
         snapshot: Snapshot,
         text: str,
         entry: Entry,
-    ) -> bool:
+    ) -> tuple[bool, dict[str, Any]]:
         if snapshot.clarification_count >= self.settings.max_clarifications_per_snapshot:
-            return False
+            return False, {"reason": "clarification_limit_reached"}
         words = [word for word in text.strip().split() if word]
         if len(words) <= 3:
-            return True
+            return True, {"reason": "very_short_answer", "word_count": len(words)}
         analyses = await repo.list_analyses_for_targets(session, target_type="entry", target_ids=[entry.id])
         feature_analysis = next((item for item in analyses if item.task_name == "extract_entry_features"), None)
         if feature_analysis is None:
-            return False
+            return False, {"reason": "features_missing"}
         features = EntryFeatures.model_validate(feature_analysis.result)
-        return features.data_quality in {"empty", "very_low"} or features.confidence < 0.35
+        missing_metrics = _missing_core_metrics(features)
+        if missing_metrics:
+            return True, {
+                "reason": "missing_" + "_and_".join(missing_metrics),
+                "missing_metrics": missing_metrics,
+                "data_quality": features.data_quality,
+                "feature_confidence": features.confidence,
+                "uncertainty_notes": features.uncertainty_notes,
+            }
+        if features.data_quality in {"empty", "very_low"} or features.confidence < 0.35:
+            return True, {
+                "reason": "low_information",
+                "data_quality": features.data_quality,
+                "feature_confidence": features.confidence,
+                "uncertainty_notes": features.uncertainty_notes,
+            }
+        return False, {
+            "reason": "enough_information",
+            "data_quality": features.data_quality,
+            "feature_confidence": features.confidence,
+        }
 
     async def _current_day(self, session: AsyncSession, user: User) -> Day:
         return await repo.get_or_create_day(
@@ -492,6 +519,20 @@ def _entry_context(entry: Entry) -> dict[str, Any]:
         "source": entry.source,
         "raw_text": entry.raw_text,
     }
+
+
+def _missing_core_metrics(features: EntryFeatures) -> list[str]:
+    missing: list[str] = []
+    if _feature_is_unclear(features.mood):
+        missing.append("mood")
+    if _feature_is_unclear(features.energy):
+        missing.append("energy")
+    return missing
+
+
+def _feature_is_unclear(feature: object) -> bool:
+    value = getattr(feature, "value", None)
+    return str(value or "").strip().lower() in {"", "unclear", "unknown", "невідомо"}
 
 
 async def _day_context(session: AsyncSession, *, day: Day, limit: int = 80) -> dict[str, Any]:

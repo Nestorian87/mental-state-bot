@@ -8,6 +8,7 @@ from mental_state_bot.db.models import Snapshot
 from mental_state_bot.services.interactions import (
     InteractionService,
     _day_context,
+    _missing_core_metrics,
     _snapshot_conversation_context,
 )
 
@@ -115,6 +116,48 @@ async def test_day_context_reports_omitted_entries(monkeypatch) -> None:
         },
         ],
     }
+
+
+def test_missing_core_metrics_detects_unclear_mood_and_energy() -> None:
+    features = interactions_module.EntryFeatures.model_validate(
+        {
+            "mood": {"value": "unclear", "confidence": 0.0},
+            "energy": {"value": "unclear", "confidence": 0.0},
+            "data_quality": "partial",
+            "confidence": 0.7,
+        }
+    )
+
+    assert _missing_core_metrics(features) == ["mood", "energy"]
+
+
+async def test_clarification_need_triggers_for_missing_core_metrics(monkeypatch) -> None:
+    entry_id = uuid4()
+    feature_result = {
+        "mood": {"value": "unclear", "confidence": 0.0},
+        "energy": {"value": "somewhat_high", "confidence": 0.45},
+        "data_quality": "partial",
+        "confidence": 0.7,
+    }
+
+    async def list_analyses_for_targets(session, *, target_type, target_ids):
+        assert target_type == "entry"
+        assert target_ids == [entry_id]
+        return [SimpleNamespace(task_name="extract_entry_features", result=feature_result)]
+
+    monkeypatch.setattr(interactions_module.repo, "list_analyses_for_targets", list_analyses_for_targets)
+
+    service = InteractionService(SimpleNamespace(max_clarifications_per_snapshot=2), None)
+    should_clarify, need = await service._clarification_need(
+        object(),
+        snapshot=SimpleNamespace(clarification_count=0),
+        text="Мастерю трек і ніби нормально просувається",
+        entry=SimpleNamespace(id=entry_id),
+    )
+
+    assert should_clarify is True
+    assert need["reason"] == "missing_mood"
+    assert need["missing_metrics"] == ["mood"]
 
 
 async def test_record_missed_reason_resolves_prompt_and_closes_snapshot(monkeypatch) -> None:

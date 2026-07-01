@@ -1009,8 +1009,8 @@ def _sparkline(points: list[int | None]) -> str:
 
 def _line_chart_png(
     series: dict[str, list[int | None]],
-    width: int = 1100,
-    height: int = 620,
+    width: int = 1800,
+    height: int = 1040,
     *,
     labels: list[str] | None = None,
     title: str = "Динаміка стану",
@@ -1018,38 +1018,38 @@ def _line_chart_png(
 ) -> bytes:
     image = Image.new("RGB", (width, height), (250, 252, 255))
     draw = ImageDraw.Draw(image)
-    title_font = _chart_font(30, bold=True)
-    text_font = _chart_font(20)
-    small_font = _chart_font(16)
+    title_font = _chart_font(42, bold=True)
+    text_font = _chart_font(28)
+    small_font = _chart_font(22)
 
-    plot_left = 92
-    plot_right = width - 56
-    plot_top = 132
-    plot_bottom = height - 96
+    plot_left = 132
+    plot_right = width - 88
+    plot_top = 214
+    plot_bottom = height - 176
     colors = {"mood": (37, 99, 235), "energy": (22, 163, 74)}
     names = {"mood": "настрій", "energy": "енергія"}
     max_len = max((len(points) for points in series.values()), default=0)
     labels = labels or [str(index + 1) for index in range(max_len)]
 
-    draw.rounded_rectangle((24, 22, width - 24, height - 22), radius=28, fill=(255, 255, 255), outline=(226, 232, 240), width=2)
-    draw.text((54, 42), title, fill=(15, 23, 42), font=title_font)
-    draw.text((54, 82), subtitle, fill=(71, 85, 105), font=text_font)
+    draw.rounded_rectangle((36, 32, width - 36, height - 32), radius=34, fill=(255, 255, 255), outline=(226, 232, 240), width=3)
+    draw.text((82, 66), title, fill=(15, 23, 42), font=title_font)
+    draw.text((82, 122), subtitle, fill=(71, 85, 105), font=text_font)
 
-    legend_x = width - 330
+    legend_x = width - 450
     for offset, key in enumerate(("mood", "energy")):
-        y = 54 + offset * 34
+        y = 78 + offset * 48
         color = colors[key]
-        draw.line((legend_x, y + 10, legend_x + 48, y + 10), fill=color, width=5)
-        draw.ellipse((legend_x + 18, y + 4, legend_x + 30, y + 16), fill=color)
-        draw.text((legend_x + 62, y), names[key], fill=(30, 41, 59), font=text_font)
+        draw.line((legend_x, y + 16, legend_x + 68, y + 16), fill=color, width=7)
+        draw.ellipse((legend_x + 26, y + 7, legend_x + 42, y + 23), fill=color)
+        draw.text((legend_x + 88, y), names[key], fill=(30, 41, 59), font=text_font)
 
     for level in range(1, 9):
         y = plot_bottom - int((level - 1) / 7 * (plot_bottom - plot_top))
         grid_color = (226, 232, 240) if level in {1, 4, 8} else (241, 245, 249)
-        draw.line((plot_left, y, plot_right, y), fill=grid_color, width=2 if level in {1, 4, 8} else 1)
-        draw.text((54, y - 10), str(level), fill=(100, 116, 139), font=small_font)
-    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(148, 163, 184), width=2)
-    draw.line((plot_left, plot_top, plot_left, plot_bottom), fill=(148, 163, 184), width=2)
+        draw.line((plot_left, y, plot_right, y), fill=grid_color, width=3 if level in {1, 4, 8} else 2)
+        draw.text((82, y - 14), str(level), fill=(100, 116, 139), font=small_font)
+    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(148, 163, 184), width=3)
+    draw.line((plot_left, plot_top, plot_left, plot_bottom), fill=(148, 163, 184), width=3)
 
     if max_len <= 0:
         return _image_png_bytes(image)
@@ -1063,26 +1063,66 @@ def _line_chart_png(
     for index in x_label_indexes:
         x = point_xy(index, 1)[0]
         label = labels[index] if index < len(labels) else str(index + 1)
-        draw.line((x, plot_bottom, x, plot_bottom + 8), fill=(148, 163, 184), width=1)
-        draw.text((x - 28, plot_bottom + 16), label, fill=(100, 116, 139), font=small_font)
+        draw.line((x, plot_bottom, x, plot_bottom + 12), fill=(148, 163, 184), width=2)
+        draw.text((x - 40, plot_bottom + 24), label, fill=(100, 116, 139), font=small_font)
 
     for name, points in series.items():
         color = colors.get(name, (15, 23, 42))
         previous: tuple[int, int] | None = None
+        previous_index: int | None = None
         for index, value in enumerate(points):
             if value is None:
-                previous = None
                 continue
             current = point_xy(index, max(1, min(value, 8)))
             if previous is not None:
-                draw.line((*previous, *current), fill=color, width=5)
-            draw.ellipse((current[0] - 7, current[1] - 7, current[0] + 7, current[1] + 7), fill=color, outline=(255, 255, 255), width=2)
+                if previous_index is not None and index - previous_index == 1:
+                    draw.line((*previous, *current), fill=color, width=7)
+                else:
+                    _draw_dashed_line(draw, previous, current, fill=color, width=5)
+            draw.ellipse((current[0] - 10, current[1] - 10, current[0] + 10, current[1] + 10), fill=color, outline=(255, 255, 255), width=3)
             previous = current
+            previous_index = index
 
     known_counts = {names.get(name, name): len([point for point in points if point is not None]) for name, points in series.items()}
     footer = " · ".join(f"{name}: {count}/{max_len} точок" for name, count in known_counts.items())
-    draw.text((plot_left, height - 58), footer, fill=(71, 85, 105), font=small_font)
+    draw.text((plot_left, height - 108), footer, fill=(71, 85, 105), font=small_font)
+    draw.text(
+        (plot_left, height - 70),
+        "Пунктир означає, що між оціненими точками були записи без достатньої числової оцінки.",
+        fill=(100, 116, 139),
+        font=small_font,
+    )
     return _image_png_bytes(image)
+
+
+def _draw_dashed_line(
+    draw: ImageDraw.ImageDraw,
+    start: tuple[int, int],
+    end: tuple[int, int],
+    *,
+    fill: tuple[int, int, int],
+    width: int,
+    dash: int = 18,
+    gap: int = 14,
+) -> None:
+    x1, y1 = start
+    x2, y2 = end
+    dx = x2 - x1
+    dy = y2 - y1
+    distance = (dx * dx + dy * dy) ** 0.5
+    if distance == 0:
+        return
+    step = dash + gap
+    travelled = 0.0
+    while travelled < distance:
+        segment_start = travelled
+        segment_end = min(travelled + dash, distance)
+        sx = x1 + dx * (segment_start / distance)
+        sy = y1 + dy * (segment_start / distance)
+        ex = x1 + dx * (segment_end / distance)
+        ey = y1 + dy * (segment_end / distance)
+        draw.line((sx, sy, ex, ey), fill=fill, width=width)
+        travelled += step
 
 
 def _chart_font(size: int, *, bold: bool = False):
