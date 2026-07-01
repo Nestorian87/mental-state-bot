@@ -268,9 +268,9 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     day_id = uuid4()
     snapshot_id = uuid4()
     target_id = uuid4()
-    correction_id = uuid4()
     target = SimpleNamespace(
         id=target_id,
+        day_id=day_id,
         snapshot_id=snapshot_id,
         source="snapshot_response",
         raw_text='"Море" прямо зараз',
@@ -283,29 +283,18 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
 
     class FakeSession:
         async def get(self, model, item_id):
-            assert model is Snapshot
-            assert item_id == snapshot_id
-            return snapshot
+            if model is Snapshot:
+                assert item_id == snapshot_id
+                return snapshot
+            return SimpleNamespace(id=item_id)
 
     class FakeAI:
         async def generate_micro_summary(self, session, *, user_id, context):
             calls["micro_context"] = context
             return SimpleNamespace(text="Я почув, що “Море” — це назва треку, який ти мастериш."), None
 
-    async def get_or_create_day(session, *, user_id, local_date_value, started_at):
-        return SimpleNamespace(id=day_id)
-
     async def get_recent_entries(session, *, user_id, limit):
         return [target]
-
-    async def add_entry(session, **kwargs):
-        return SimpleNamespace(
-            id=correction_id,
-            source=kwargs["source"],
-            raw_text=kwargs["raw_text"],
-            created_at=None,
-            local_timestamp=kwargs["local_timestamp"],
-        )
 
     async def get_user_settings(session, user_id):
         return SimpleNamespace(
@@ -335,9 +324,7 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
     async def analyze_entry_features(session, **kwargs):
         calls["feature_context"] = kwargs
 
-    monkeypatch.setattr(interactions_module.repo, "get_or_create_day", get_or_create_day)
     monkeypatch.setattr(interactions_module.repo, "get_recent_entries", get_recent_entries)
-    monkeypatch.setattr(interactions_module.repo, "add_entry", add_entry)
     monkeypatch.setattr(interactions_module.repo, "get_user_settings", get_user_settings)
     monkeypatch.setattr(interactions_module.repo, "list_day_entries", list_day_entries)
     monkeypatch.setattr(interactions_module.repo, "get_snapshot_prompts", get_snapshot_prompts)
@@ -356,9 +343,15 @@ async def test_record_correction_returns_revised_summary_with_correction_keyboar
 
     assert result.replies[-1].text == "Я почув, що “Море” — це назва треку, який ти мастериш."
     assert result.replies[-1].keyboard == "correction"
+    assert result.entry_id == target_id
+    assert result.should_embed_entry is True
     assert calls["micro_context"]["latest_prompt"] == "Який трек мастериш?"
     assert calls["micro_context"]["original_entry"]["raw_text"] == '"Море" прямо зараз'
     assert calls["feature_context"]["entry"] is target
     assert calls["feature_context"]["extra_context"]["latest_prompt"] == "Який трек мастериш?"
     assert calls["feature_context"]["extra_context"]["correction_text"] == 'Ні, "Море" це назва треку'
-    assert calls["analyses"][0]["target_id"] == correction_id
+    assert [item["task_name"] for item in calls["analyses"]] == [
+        "apply_correction",
+        "generate_micro_summary",
+    ]
+    assert {item["target_id"] for item in calls["analyses"]} == {target_id}

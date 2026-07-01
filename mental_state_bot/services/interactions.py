@@ -250,7 +250,6 @@ class InteractionService:
         telegram_message_id: int | None,
         reply_to_message_id: int | None,
     ) -> InteractionResult:
-        day = await self._current_day(session, user)
         recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=20)
         target = next(
             (
@@ -260,24 +259,17 @@ class InteractionService:
             ),
             None,
         )
-        entry = await repo.add_entry(
-            session,
-            user_id=user.id,
-            day_id=day.id,
-            snapshot_id=target.snapshot_id if target else None,
-            source="correction",
-            raw_text=f"виправлення: {correction_text}",
-            telegram_message_id=telegram_message_id,
-            reply_to_message_id=reply_to_message_id,
-            local_timestamp=local_now(user.timezone),
-            meta={
-                "correction_for_entry_id": str(target.id) if target else None,
-                "correction_for_source": target.source if target else None,
-            },
-        )
+        if target is None:
+            return InteractionResult(
+                replies=[BotReply("Не знайшов запис, який можна виправити.")],
+                snapshot_closed=True,
+            )
         target_note = "останнього запису" if target else "контексту"
         user_settings = await repo.get_user_settings(session, user.id)
         style_context = _style_context(user_settings)
+        day = await session.get(Day, target.day_id) if target.day_id else None
+        if day is None:
+            day = await self._current_day(session, user)
         day_context = await _day_context(session, day=day)
         snapshot = await session.get(Snapshot, target.snapshot_id) if target and target.snapshot_id else None
         snapshot_conversation = (
@@ -316,6 +308,25 @@ class InteractionService:
                     "backfill": False,
                 },
             )
+            await repo.add_ai_analysis(
+                session,
+                user_id=user.id,
+                target_type="entry",
+                target_id=target.id,
+                task_name="apply_correction",
+                schema_version="correction.v1",
+                provider=self.settings.ai_provider,
+                model=self.settings.ai_live_model,
+                result={
+                    "correction_text": correction_text,
+                    "telegram_message_id": telegram_message_id,
+                    "reply_to_message_id": reply_to_message_id,
+                    "corrected_at": local_now(user.timezone).isoformat(),
+                },
+                confidence=None,
+                uncertainty_notes=[],
+                model_run_id=None,
+            )
         micro_summary, _ = await self.ai.generate_micro_summary(
             session,
             user_id=user.id,
@@ -332,13 +343,13 @@ class InteractionService:
                 "style": style_context,
             },
         )
-        await self._store_micro_summary(session, user=user, entry=entry, micro_summary=micro_summary.text)
+        await self._store_micro_summary(session, user=user, entry=target, micro_summary=micro_summary.text)
         return InteractionResult(
             replies=[
-                BotReply(f"Записав виправлення для {target_note}."),
+                BotReply(f"Оновив трактування для {target_note}."),
                 BotReply(micro_summary.text, keyboard="correction"),
             ],
-            entry_id=entry.id,
+            entry_id=target.id,
             snapshot_closed=True,
             should_embed_entry=True,
         )

@@ -628,7 +628,16 @@ async def correction_message_handler(
     for reply in replies:
         await message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
     if should_embed and entry_id and user_id:
-        asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
+        asyncio.create_task(
+            _embed_entry_task(
+                settings,
+                sessionmaker,
+                memory_service,
+                entry_id,
+                user_id,
+                replace_existing=True,
+            )
+        )
 
 
 @router.message(Command("pause"))
@@ -1672,6 +1681,7 @@ async def entry_handler(
     should_embed = False
     replies = []
     user_id = None
+    replace_existing_embedding = False
     voice_note: VoiceNoteTranscription | None = None
     direct_response_sent = False
     async with sessionmaker() as session, session.begin():
@@ -1787,6 +1797,7 @@ async def entry_handler(
             entry_id = result.entry_id
             should_embed = result.should_embed_entry
             replies = result.replies
+            replace_existing_embedding = pending_kind == "correction"
         elif not message.photo and _is_sleep_marker_text(text):
             replies = [BotReply("Закрити день і згенерувати підсумок?", keyboard="sleep_confirm")]
         elif not message.photo and (missed_reason := _missed_reason_text(text)):
@@ -1863,7 +1874,16 @@ async def entry_handler(
             reply_markup=_inline_reply_keyboard(reply.keyboard),
         )
     if should_embed and entry_id and user_id:
-        asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
+        asyncio.create_task(
+            _embed_entry_task(
+                settings,
+                sessionmaker,
+                memory_service,
+                entry_id,
+                user_id,
+                replace_existing=replace_existing_embedding,
+            )
+        )
 
 
 @router.callback_query(F.data.startswith("missed_reason:"))
@@ -2361,13 +2381,20 @@ async def _embed_entry_task(
     memory_service: MemoryService,
     entry_id: UUID,
     user_id: UUID,
+    *,
+    replace_existing: bool = False,
 ) -> None:
     try:
         async with sessionmaker() as session, session.begin():
             entry = await repo.get_entry(session, entry_id=entry_id)
             if entry is None:
                 return
-            await memory_service.embed_entry(session, entry=entry, user_id=user_id)
+            await memory_service.embed_entry(
+                session,
+                entry=entry,
+                user_id=user_id,
+                replace_existing=replace_existing,
+            )
     except Exception:
         logger.exception("Background embedding task failed", extra={"entry_id": str(entry_id)})
 
