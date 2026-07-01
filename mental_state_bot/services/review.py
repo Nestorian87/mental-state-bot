@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import struct
-import zlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
 from decimal import Decimal
+from io import BytesIO
 from typing import Any
 
+from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mental_state_bot.db import repositories as repo
@@ -127,7 +127,7 @@ async def format_metrics_for_day(
     quality_counts: dict[str, int] = defaultdict(int)
     mood_points: list[int | None] = []
     energy_points: list[int | None] = []
-    pleasant_count = 0
+    meaningful_pleasant: list[str] = []
     unnormalized_label_count = 0
 
     for entry in entries:
@@ -147,7 +147,8 @@ async def format_metrics_for_day(
         quality_counts[_data_quality_label(result.get("data_quality"))] += 1
         mood_points.append(_feature_score(result.get("mood")))
         energy_points.append(_feature_score(result.get("energy")))
-        pleasant_count += len(result.get("pleasant_moments") or [])
+        meaningful_pleasant.extend(_meaningful_pleasant_moments(result.get("pleasant_moments") or []))
+    meaningful_pleasant = _dedupe_texts(meaningful_pleasant)
 
     metrics_notes = []
     if unnormalized_label_count:
@@ -158,21 +159,31 @@ async def format_metrics_for_day(
 
     lines = [
         f"Метрики за {day_title}: {_entry_count_text(len(entries))}.",
-        f"Приємні/живі моменти, знайдені AI: {pleasant_count}",
         "",
-        "Настрій:",
-        _sparkline(mood_points),
-        "Енергія:",
-        _sparkline(energy_points),
+        "Коротко:",
+        *_metrics_overview_lines(
+            entries=entries,
+            mood_points=mood_points,
+            energy_points=energy_points,
+            quality_counts=quality_counts,
+            timezone=user.timezone,
+        ),
+        "",
+        "Динаміка:",
+        *_metric_dimension_lines("Настрій", mood_points, entries=entries, timezone=user.timezone),
+        *_metric_dimension_lines("Енергія", energy_points, entries=entries, timezone=user.timezone),
+        "",
+        f"Значущі приємні/живі моменти: {len(meaningful_pleasant)}",
+        _format_bullets(meaningful_pleasant[:5], empty="немає явних значущих моментів"),
         "",
         "Якість даних:",
-        _format_counts(quality_counts),
+        _format_counts(quality_counts, limit=6),
         "",
         "Найчастіші стани:",
-        _format_counts(state_counts, empty="немає явних станів"),
+        _format_counts(state_counts, empty="немає явних станів", limit=6),
         "",
         "Найчастіші активності:",
-        _format_counts(activity_counts, empty="немає явних активностей"),
+        _format_counts(activity_counts, empty="немає явних активностей", limit=6),
     ]
     if metrics_notes:
         lines.extend(["", "Примітки:", *metrics_notes])
@@ -202,7 +213,13 @@ async def build_metrics_chart_png_for_day(session: AsyncSession, *, user: User, 
     ]
     if not any(point is not None for point in [*mood_points, *energy_points]):
         return None
-    return _line_chart_png({"mood": mood_points, "energy": energy_points})
+    labels = [_entry_time_text(entry, user.timezone) for entry in entries]
+    return _line_chart_png(
+        {"mood": mood_points, "energy": energy_points},
+        labels=labels,
+        title=f"Динаміка дня: {day.local_date.isoformat()}",
+        subtitle="Шкала 1-8. Порожні місця означають, що AI не мав достатньо даних для оцінки.",
+    )
 
 
 async def get_today_photo_moments(session: AsyncSession, *, user: User) -> list[PhotoMoment]:
@@ -484,7 +501,7 @@ async def format_period_metrics_view(session: AsyncSession, *, user: User, summa
         f"{start_date.isoformat()} - {end_date.isoformat()}",
         f"Записів: {report['entry_count']}",
         f"Днів із записами: {report['active_days']}/{report['total_days']}",
-        f"Приємні/живі моменти, знайдені AI: {report['pleasant_count']}",
+        f"Значущі приємні/живі моменти: {report['pleasant_count']}",
         "",
         "Настрій по днях:",
         _sparkline(report["daily_mood"]),
@@ -519,7 +536,14 @@ async def build_period_metrics_chart_png(
     daily_energy = report["daily_energy"]
     if not any(point is not None for point in [*daily_mood, *daily_energy]):
         return None
-    return _line_chart_png({"mood": daily_mood, "energy": daily_energy})
+    start_date, end_date = _summary_local_date_range(summary, user.timezone)
+    labels = [current.strftime("%m-%d") for current in _date_range(start_date, end_date)]
+    return _line_chart_png(
+        {"mood": daily_mood, "energy": daily_energy},
+        labels=labels,
+        title=f"Динаміка: {_period_title(summary).lower()}",
+        subtitle="Кожна точка — середня оцінка дня за наявними записами.",
+    )
 
 
 async def format_period_days_view(session: AsyncSession, *, user: User, summary: Summary) -> str:
@@ -709,7 +733,25 @@ def _metrics_label_text(label: object) -> str | None:
         return None
     if any("a" <= char.lower() <= "z" for char in text):
         return None
-    return text
+    return _canonical_metric_label(text)
+
+
+def _canonical_metric_label(text: str) -> str:
+    normalized = " ".join(text.lower().replace("_", " ").split())
+    aliases = {
+        "гуляти": "прогулянка",
+        "гуляння": "прогулянка",
+        "ходив гуляти": "прогулянка",
+        "йду додому": "дорога додому",
+        "walking home": "дорога додому",
+        "гарний настрій": "радість",
+        "добрий настрій": "радість",
+        "енергійний": "енергія",
+        "енергійність": "енергія",
+        "виснажено": "виснаження",
+        "втомлений": "втома",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def _feature_value_label(value: str | None) -> str:
@@ -818,6 +860,138 @@ def _latest_feature_results_by_entry(analyses) -> dict[str, dict[str, Any]]:
     return results
 
 
+def _metrics_overview_lines(
+    *,
+    entries: list[Entry],
+    mood_points: list[int | None],
+    energy_points: list[int | None],
+    quality_counts: dict[str, int],
+    timezone: str,
+) -> list[str]:
+    mood_known = [point for point in mood_points if point is not None]
+    energy_known = [point for point in energy_points if point is not None]
+    lines = [
+        f"- Покриття оцінок: настрій {len(mood_known)}/{len(entries)}, енергія {len(energy_known)}/{len(entries)}.",
+    ]
+    if len(mood_known) < max(3, len(entries) // 3):
+        lines.append("- Графік варто читати обережно: AI зміг оцінити лише частину записів.")
+    if mood_known:
+        avg = sum(mood_known) / len(mood_known)
+        lines.append(f"- Настрій у відомих точках: {_score_word(avg)} ({avg:.1f}/8).")
+    if energy_known:
+        avg = sum(energy_known) / len(energy_known)
+        lines.append(f"- Енергія у відомих точках: {_score_word(avg)} ({avg:.1f}/8).")
+    weak_quality = quality_counts.get("дуже мало даних", 0) + quality_counts.get("невідомо", 0)
+    if weak_quality:
+        lines.append(f"- Записів із дуже слабким/невідомим контекстом: {weak_quality}.")
+    first_known = _first_known_metric_time(entries, [mood_points, energy_points], timezone)
+    last_known = _last_known_metric_time(entries, [mood_points, energy_points], timezone)
+    if first_known and last_known and first_known != last_known:
+        lines.append(f"- Оцінювана частина дня: приблизно {first_known}-{last_known}.")
+    return lines
+
+
+def _metric_dimension_lines(
+    title: str,
+    points: list[int | None],
+    *,
+    entries: list[Entry],
+    timezone: str,
+) -> list[str]:
+    known = [(index, point) for index, point in enumerate(points) if point is not None]
+    if not known:
+        return [f"{title}: даних мало."]
+    values = [point for _, point in known]
+    min_value = min(values)
+    max_value = max(values)
+    avg = sum(values) / len(values)
+    low_times = _metric_times_for_value(entries, known, min_value, timezone)
+    high_times = _metric_times_for_value(entries, known, max_value, timezone)
+    return [
+        f"{title}: {_score_word(avg)}; сер={avg:.1f}/8, мін={min_value}, макс={max_value}, даних={len(known)}/{len(points)}.",
+        f"  Найнижче: {', '.join(low_times[:3])}; найвище: {', '.join(high_times[:3])}.",
+    ]
+
+
+def _score_word(value: float) -> str:
+    if value < 2.5:
+        return "дуже низько"
+    if value < 3.5:
+        return "низько"
+    if value < 4.75:
+        return "змішано/нижче середнього"
+    if value < 6.25:
+        return "середньо"
+    if value < 7.25:
+        return "добре"
+    return "дуже високо"
+
+
+def _metric_times_for_value(
+    entries: list[Entry],
+    known: list[tuple[int, int]],
+    value: int,
+    timezone: str,
+) -> list[str]:
+    times = []
+    for index, point in known:
+        if point == value and index < len(entries):
+            times.append(_entry_time_text(entries[index], timezone))
+    return times or ["невідомо"]
+
+
+def _first_known_metric_time(
+    entries: list[Entry],
+    point_groups: list[list[int | None]],
+    timezone: str,
+) -> str | None:
+    for index, _entry in enumerate(entries):
+        if any(index < len(points) and points[index] is not None for points in point_groups):
+            return _entry_time_text(entries[index], timezone)
+    return None
+
+
+def _last_known_metric_time(
+    entries: list[Entry],
+    point_groups: list[list[int | None]],
+    timezone: str,
+) -> str | None:
+    for index in range(len(entries) - 1, -1, -1):
+        if any(index < len(points) and points[index] is not None for points in point_groups):
+            return _entry_time_text(entries[index], timezone)
+    return None
+
+
+def _meaningful_pleasant_moments(items: list[object]) -> list[str]:
+    ignored = {"", "немає", "немає даних", "невідомо", "unknown", "none", "нічого"}
+    moments = []
+    for item in items:
+        text = " ".join(str(item or "").strip().split())
+        normalized = text.lower().strip(" .,!?:;")
+        if normalized in ignored or len(normalized) < 10:
+            continue
+        moments.append(text)
+    return moments
+
+
+def _dedupe_texts(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result = []
+    for item in items:
+        key = " ".join(item.lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _format_bullets(items: list[str], *, empty: str = "немає даних") -> str:
+    if not items:
+        return empty
+    return "\n".join(f"- {item}" for item in items)
+
+
 def _sparkline(points: list[int | None]) -> str:
     if not points:
         return "немає даних"
@@ -833,61 +1007,64 @@ def _sparkline(points: list[int | None]) -> str:
     )
 
 
-def _line_chart_png(series: dict[str, list[int | None]], width: int = 900, height: int = 420) -> bytes:
-    pixels = bytearray([255, 255, 255] * width * height)
-    margin = 54
-    plot_left = margin
-    plot_right = width - margin
-    plot_top = margin
-    plot_bottom = height - margin
+def _line_chart_png(
+    series: dict[str, list[int | None]],
+    width: int = 1100,
+    height: int = 620,
+    *,
+    labels: list[str] | None = None,
+    title: str = "Динаміка стану",
+    subtitle: str = "Шкала 1-8",
+) -> bytes:
+    image = Image.new("RGB", (width, height), (250, 252, 255))
+    draw = ImageDraw.Draw(image)
+    title_font = _chart_font(30, bold=True)
+    text_font = _chart_font(20)
+    small_font = _chart_font(16)
 
-    def set_pixel(x: int, y: int, color: tuple[int, int, int]) -> None:
-        if 0 <= x < width and 0 <= y < height:
-            offset = (y * width + x) * 3
-            pixels[offset : offset + 3] = bytes(color)
+    plot_left = 92
+    plot_right = width - 56
+    plot_top = 132
+    plot_bottom = height - 96
+    colors = {"mood": (37, 99, 235), "energy": (22, 163, 74)}
+    names = {"mood": "настрій", "energy": "енергія"}
+    max_len = max((len(points) for points in series.values()), default=0)
+    labels = labels or [str(index + 1) for index in range(max_len)]
 
-    def draw_line(x1: int, y1: int, x2: int, y2: int, color: tuple[int, int, int], thickness: int = 2) -> None:
-        dx = abs(x2 - x1)
-        dy = -abs(y2 - y1)
-        sx = 1 if x1 < x2 else -1
-        sy = 1 if y1 < y2 else -1
-        err = dx + dy
-        x, y = x1, y1
-        while True:
-            for tx in range(-thickness + 1, thickness):
-                for ty in range(-thickness + 1, thickness):
-                    set_pixel(x + tx, y + ty, color)
-            if x == x2 and y == y2:
-                break
-            e2 = 2 * err
-            if e2 >= dy:
-                err += dy
-                x += sx
-            if e2 <= dx:
-                err += dx
-                y += sy
+    draw.rounded_rectangle((24, 22, width - 24, height - 22), radius=28, fill=(255, 255, 255), outline=(226, 232, 240), width=2)
+    draw.text((54, 42), title, fill=(15, 23, 42), font=title_font)
+    draw.text((54, 82), subtitle, fill=(71, 85, 105), font=text_font)
 
-    def draw_circle(cx: int, cy: int, radius: int, color: tuple[int, int, int]) -> None:
-        for y in range(cy - radius, cy + radius + 1):
-            for x in range(cx - radius, cx + radius + 1):
-                if (x - cx) ** 2 + (y - cy) ** 2 <= radius**2:
-                    set_pixel(x, y, color)
+    legend_x = width - 330
+    for offset, key in enumerate(("mood", "energy")):
+        y = 54 + offset * 34
+        color = colors[key]
+        draw.line((legend_x, y + 10, legend_x + 48, y + 10), fill=color, width=5)
+        draw.ellipse((legend_x + 18, y + 4, legend_x + 30, y + 16), fill=color)
+        draw.text((legend_x + 62, y), names[key], fill=(30, 41, 59), font=text_font)
 
     for level in range(1, 9):
         y = plot_bottom - int((level - 1) / 7 * (plot_bottom - plot_top))
-        draw_line(plot_left, y, plot_right, y, (232, 237, 242), thickness=1)
-    draw_line(plot_left, plot_bottom, plot_right, plot_bottom, (145, 160, 180), thickness=1)
-    draw_line(plot_left, plot_top, plot_left, plot_bottom, (145, 160, 180), thickness=1)
+        grid_color = (226, 232, 240) if level in {1, 4, 8} else (241, 245, 249)
+        draw.line((plot_left, y, plot_right, y), fill=grid_color, width=2 if level in {1, 4, 8} else 1)
+        draw.text((54, y - 10), str(level), fill=(100, 116, 139), font=small_font)
+    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(148, 163, 184), width=2)
+    draw.line((plot_left, plot_top, plot_left, plot_bottom), fill=(148, 163, 184), width=2)
 
-    colors = {"mood": (37, 99, 235), "energy": (22, 163, 74)}
-    max_len = max((len(points) for points in series.values()), default=0)
     if max_len <= 0:
-        return _encode_png(width, height, bytes(pixels))
+        return _image_png_bytes(image)
 
     def point_xy(index: int, value: int) -> tuple[int, int]:
         x = (plot_left + plot_right) // 2 if max_len == 1 else plot_left + int(index / (max_len - 1) * (plot_right - plot_left))
         y = plot_bottom - int((value - 1) / 7 * (plot_bottom - plot_top))
         return x, y
+
+    x_label_indexes = _chart_label_indexes(max_len)
+    for index in x_label_indexes:
+        x = point_xy(index, 1)[0]
+        label = labels[index] if index < len(labels) else str(index + 1)
+        draw.line((x, plot_bottom, x, plot_bottom + 8), fill=(148, 163, 184), width=1)
+        draw.text((x - 28, plot_bottom + 16), label, fill=(100, 116, 139), font=small_font)
 
     for name, points in series.items():
         color = colors.get(name, (15, 23, 42))
@@ -898,41 +1075,50 @@ def _line_chart_png(series: dict[str, list[int | None]], width: int = 900, heigh
                 continue
             current = point_xy(index, max(1, min(value, 8)))
             if previous is not None:
-                draw_line(*previous, *current, color, thickness=2)
-            draw_circle(*current, radius=5, color=color)
+                draw.line((*previous, *current), fill=color, width=5)
+            draw.ellipse((current[0] - 7, current[1] - 7, current[0] + 7, current[1] + 7), fill=color, outline=(255, 255, 255), width=2)
             previous = current
 
-    draw_line(70, 24, 125, 24, colors["mood"], thickness=3)
-    draw_line(170, 24, 225, 24, colors["energy"], thickness=3)
-    return _encode_png(width, height, bytes(pixels))
+    known_counts = {names.get(name, name): len([point for point in points if point is not None]) for name, points in series.items()}
+    footer = " · ".join(f"{name}: {count}/{max_len} точок" for name, count in known_counts.items())
+    draw.text((plot_left, height - 58), footer, fill=(71, 85, 105), font=small_font)
+    return _image_png_bytes(image)
 
 
-def _encode_png(width: int, height: int, rgb: bytes) -> bytes:
-    raw_rows = [b"\x00" + rgb[y * width * 3 : (y + 1) * width * 3] for y in range(height)]
-    raw = b"".join(raw_rows)
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data))
-            + kind
-            + data
-            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-        )
-
-    return b"".join(
-        [
-            b"\x89PNG\r\n\x1a\n",
-            chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)),
-            chunk(b"IDAT", zlib.compress(raw, level=6)),
-            chunk(b"IEND", b""),
-        ]
-    )
+def _chart_font(size: int, *, bold: bool = False):
+    font_paths = [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    ]
+    for path in font_paths:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
-def _format_counts(counts: dict[str, int], empty: str = "немає даних") -> str:
+def _chart_label_indexes(length: int) -> list[int]:
+    if length <= 1:
+        return [0] if length else []
+    if length <= 6:
+        return list(range(length))
+    indexes = {0, length - 1, length // 2, length // 4, (length * 3) // 4}
+    return sorted(indexes)
+
+
+def _image_png_bytes(image: Image.Image) -> bytes:
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def _format_counts(counts: dict[str, int], empty: str = "немає даних", *, limit: int = 8) -> str:
     if not counts:
         return empty
-    return "\n".join(f"- {key}: {value}" for key, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8])
+    return "\n".join(f"- {key}: {value}" for key, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit])
 
 
 def _metric_entries(entries: list[Entry]) -> list[Entry]:
@@ -963,7 +1149,7 @@ async def _period_metrics_report(session: AsyncSession, *, user: User, summary: 
     quality_counts: dict[str, int] = defaultdict(int)
     mood_by_day: dict[date, list[int]] = defaultdict(list)
     energy_by_day: dict[date, list[int]] = defaultdict(list)
-    pleasant_count = 0
+    meaningful_pleasant: list[str] = []
     unnormalized_label_count = 0
 
     for entry in entries:
@@ -988,7 +1174,7 @@ async def _period_metrics_report(session: AsyncSession, *, user: User, summary: 
             mood_by_day[entry_date].append(mood)
         if entry_date is not None and energy is not None:
             energy_by_day[entry_date].append(energy)
-        pleasant_count += len(result.get("pleasant_moments") or [])
+        meaningful_pleasant.extend(_meaningful_pleasant_moments(result.get("pleasant_moments") or []))
 
     dates = list(_date_range(start_date, end_date))
     entry_counts = _entry_counts_by_local_date(entries, timezone=user.timezone)
@@ -996,7 +1182,7 @@ async def _period_metrics_report(session: AsyncSession, *, user: User, summary: 
         "entry_count": len(entries),
         "active_days": len([count for count in entry_counts.values() if count]),
         "total_days": len(dates),
-        "pleasant_count": pleasant_count,
+        "pleasant_count": len(_dedupe_texts(meaningful_pleasant)),
         "daily_mood": [_rounded_average(mood_by_day.get(current, [])) for current in dates],
         "daily_energy": [_rounded_average(energy_by_day.get(current, [])) for current in dates],
         "quality_counts": quality_counts,

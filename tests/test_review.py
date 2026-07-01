@@ -12,6 +12,7 @@ from mental_state_bot.services.review import (
     _format_entry_line,
     _latest_feature_results_by_entry,
     _line_chart_png,
+    _meaningful_pleasant_moments,
     _metrics_label_text,
     _sparkline,
     _truncate,
@@ -172,6 +173,12 @@ def test_metrics_label_text_hides_non_normalized_english_labels() -> None:
     assert _metrics_label_text("спокій") == "спокій"
     assert _metrics_label_text("fear") is None
     assert _metrics_label_text("feeling punished") is None
+
+
+def test_meaningful_pleasant_moments_filters_noise() -> None:
+    moments = _meaningful_pleasant_moments(["", "ок", "немає", "теплі обійми уві сні", "спокійне читання"])
+
+    assert moments == ["теплі обійми уві сні", "спокійне читання"]
 
 
 def test_latest_feature_results_prefers_newer_ai_analysis() -> None:
