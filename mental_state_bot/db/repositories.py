@@ -138,6 +138,17 @@ async def get_day(session: AsyncSession, *, day_id: uuid.UUID) -> Day | None:
     return await session.get(Day, day_id)
 
 
+async def list_days_between(
+    session: AsyncSession, *, user_id: uuid.UUID, start_date: date, end_date: date
+) -> Sequence[Day]:
+    result = await session.execute(
+        select(Day)
+        .where(Day.user_id == user_id, Day.local_date >= start_date, Day.local_date <= end_date)
+        .order_by(Day.local_date)
+    )
+    return result.scalars().all()
+
+
 async def close_day(
     session: AsyncSession,
     *,

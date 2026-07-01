@@ -199,6 +199,26 @@ class SummaryService:
             end_date=end_date,
         )
 
+    async def generate_previous_week_summary(self, session: AsyncSession, *, user: User) -> Summary:
+        start_date, end_date = previous_week_dates(local_date(user.timezone))
+        return await self.generate_period_summary(
+            session,
+            user=user,
+            period_type="weekly",
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    async def generate_previous_month_summary(self, session: AsyncSession, *, user: User) -> Summary:
+        start_date, end_date = previous_month_dates(local_date(user.timezone))
+        return await self.generate_period_summary(
+            session,
+            user=user,
+            period_type="monthly",
+            start_date=start_date,
+            end_date=end_date,
+        )
+
     async def generate_previous_week_summary_if_needed(
         self, session: AsyncSession, *, user: User
     ) -> Summary | None:
@@ -217,13 +237,7 @@ class SummaryService:
         )
         if not entries:
             return None
-        return await self.generate_period_summary(
-            session,
-            user=user,
-            period_type="weekly",
-            start_date=start_date,
-            end_date=end_date,
-        )
+        return await self.generate_previous_week_summary(session, user=user)
 
     async def generate_previous_month_summary_if_needed(
         self, session: AsyncSession, *, user: User
@@ -243,13 +257,7 @@ class SummaryService:
         )
         if not entries:
             return None
-        return await self.generate_period_summary(
-            session,
-            user=user,
-            period_type="monthly",
-            start_date=start_date,
-            end_date=end_date,
-        )
+        return await self.generate_previous_month_summary(session, user=user)
 
     async def generate_period_summary(
         self,

@@ -20,6 +20,7 @@ from mental_state_bot.bot.keyboards import (
     correction_keyboard,
     day_detail_keyboard,
     main_reply_keyboard,
+    period_detail_keyboard,
     settings_keyboard,
     sleep_confirmation_keyboard,
     snapshot_clarification_keyboard,
@@ -51,6 +52,7 @@ from mental_state_bot.services.review import (
     PhotoMoment,
     build_metrics_chart_png,
     build_metrics_chart_png_for_day,
+    build_period_metrics_chart_png,
     format_cost_report,
     format_day_summary_section,
     format_day_view,
@@ -59,7 +61,10 @@ from mental_state_bot.services.review import (
     format_latest_summary_section,
     format_metrics_for_day,
     format_metrics_view,
+    format_period_days_view,
+    format_period_metrics_view,
     format_period_summary,
+    format_period_timeline_view,
     format_photo_moments_view,
     format_raw_entries_for_day,
     format_raw_entries_view,
@@ -343,9 +348,13 @@ async def week_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         async with _typing(message):
-            summary = await summary_service.generate_current_week_summary(session, user=user)
+            if _is_previous_period_query(_command_argument(message.text or "")):
+                summary = await summary_service.generate_previous_week_summary(session, user=user)
+            else:
+                summary = await summary_service.generate_current_week_summary(session, user=user)
         text = format_period_summary(summary)
-    await _answer_long_text(message, text)
+        summary_id = str(summary.id)
+    await _answer_long_text(message, text, reply_markup=period_detail_keyboard(summary_id=summary_id))
 
 
 @router.message(Command("month"))
@@ -360,9 +369,13 @@ async def month_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         async with _typing(message):
-            summary = await summary_service.generate_current_month_summary(session, user=user)
+            if _is_previous_period_query(_command_argument(message.text or "")):
+                summary = await summary_service.generate_previous_month_summary(session, user=user)
+            else:
+                summary = await summary_service.generate_current_month_summary(session, user=user)
         text = format_period_summary(summary)
-    await _answer_long_text(message, text)
+        summary_id = str(summary.id)
+    await _answer_long_text(message, text, reply_markup=period_detail_keyboard(summary_id=summary_id))
 
 
 @router.message(Command("report"))
@@ -1223,8 +1236,53 @@ async def period_callback_handler(
             else:
                 summary = await summary_service.generate_current_week_summary(session, user=user)
         text = format_period_summary(summary)
+        summary_id = str(summary.id)
     await callback.answer()
-    await _answer_long_text(callback.message, text)
+    await _answer_long_text(callback.message, text, reply_markup=period_detail_keyboard(summary_id=summary_id))
+
+
+@router.callback_query(F.data.startswith("periodview:"))
+async def period_detail_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    parsed = _parse_scoped_callback(callback.data or "", prefix="periodview")
+    if parsed is None:
+        await callback.answer("Не можу відкрити цей період")
+        return
+    summary_id, section = parsed
+    chart = None
+    reply_markup = None
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        summary = await repo.get_summary(session, summary_id=summary_id)
+        if summary is None or summary.user_id != user.id or summary.period_type not in {"weekly", "monthly"}:
+            text = "Не знайшов цей підсумок періоду."
+        else:
+            reply_markup = period_detail_keyboard(summary_id=str(summary.id))
+            if section == "timeline":
+                text = await format_period_timeline_view(session, user=user, summary=summary)
+            elif section == "metrics":
+                text = await format_period_metrics_view(session, user=user, summary=summary)
+            elif section == "chart":
+                text = "Графік по днях: синя лінія — настрій, зелена — енергія."
+                chart = await build_period_metrics_chart_png(session, user=user, summary=summary)
+                if chart is None:
+                    text = "Для графіка за цей період поки замало метрик."
+            elif section == "days":
+                text = await format_period_days_view(session, user=user, summary=summary)
+            else:
+                text = format_period_summary(summary)
+    await callback.answer()
+    await _answer_long_text(callback.message, text, reply_markup=reply_markup)
+    if chart is not None:
+        await callback.message.answer_photo(
+            BufferedInputFile(chart, filename="period-metrics.png"),
+            caption="Графік по днях: синя лінія — настрій, зелена — енергія.",
+        )
 
 
 @router.message((F.text & ~F.text.startswith("/")) | F.caption | F.photo | F.voice)
@@ -2035,6 +2093,11 @@ def _parse_day_query(query: str, timezone: str) -> date | None:
         return None
 
 
+def _is_previous_period_query(query: str) -> bool:
+    normalized = " ".join(query.strip().lower().split())
+    return normalized in {"prev", "previous", "попередній", "попередня", "минулий", "минула"}
+
+
 def _parse_scoped_callback(data: str, *, prefix: str) -> tuple[UUID, str] | None:
     parts = data.split(":")
     if len(parts) != 3 or parts[0] != prefix:
@@ -2080,7 +2143,9 @@ def _help_text() -> str:
             "/summary - згенерувати підсумок дня",
             "/sleep - закрити день і згенерувати підсумок",
             "/week - підсумок поточного тижня",
+            "/week prev - підсумок попереднього тижня",
             "/month - підсумок поточного місяця",
+            "/month prev - підсумок попереднього місяця",
             "/similar <текст> - знайти схожі моменти",
             "/costs - витрати й токени",
             "/audit - стан архіву й покриття даних",

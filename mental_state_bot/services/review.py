@@ -436,6 +436,132 @@ def format_period_summary(summary: Summary) -> str:
     return "\n".join(line for line in lines if line is not None).strip()
 
 
+async def format_period_timeline_view(session: AsyncSession, *, user: User, summary: Summary) -> str:
+    start_date, end_date = _summary_local_date_range(summary, user.timezone)
+    days = await repo.list_days_between(session, user_id=user.id, start_date=start_date, end_date=end_date)
+    entries = await repo.list_entries_between(
+        session,
+        user_id=user.id,
+        start=summary.period_start,
+        end=summary.period_end,
+    )
+    daily_summaries = await repo.list_summaries_between(
+        session,
+        user_id=user.id,
+        period_type="daily",
+        start=summary.period_start,
+        end=summary.period_end,
+    )
+    entry_counts = _entry_counts_by_local_date(entries, timezone=user.timezone)
+    summaries_by_date = {
+        summary_item.period_start.astimezone(zoneinfo(user.timezone)).date(): summary_item
+        for summary_item in daily_summaries
+    }
+    day_ids_by_date = {day.local_date: day.id for day in days}
+    lines = [
+        _period_title(summary),
+        f"{start_date.isoformat()} - {end_date.isoformat()}",
+        "",
+        "Таймлайн періоду",
+    ]
+    for current in _date_range(start_date, end_date):
+        count = entry_counts.get(current, 0)
+        daily = summaries_by_date.get(current)
+        marker = "•" if count else "·"
+        summary_text = _truncate(daily.short_text, 120) if daily else "денного підсумку немає"
+        if count == 0:
+            summary_text = "немає записів"
+        day_hint = f" /day {current.isoformat()}" if current in day_ids_by_date else ""
+        lines.append(f"{marker} {current.isoformat()}: {_entry_count_text(count)} — {summary_text}{day_hint}")
+    return "\n".join(lines)
+
+
+async def format_period_metrics_view(session: AsyncSession, *, user: User, summary: Summary) -> str:
+    report = await _period_metrics_report(session, user=user, summary=summary)
+    start_date, end_date = _summary_local_date_range(summary, user.timezone)
+    lines = [
+        f"Метрики: {_period_title(summary).lower()}",
+        f"{start_date.isoformat()} - {end_date.isoformat()}",
+        f"Записів: {report['entry_count']}",
+        f"Днів із записами: {report['active_days']}/{report['total_days']}",
+        f"Приємні/живі моменти, знайдені AI: {report['pleasant_count']}",
+        "",
+        "Настрій по днях:",
+        _sparkline(report["daily_mood"]),
+        "Енергія по днях:",
+        _sparkline(report["daily_energy"]),
+        "",
+        "Якість даних:",
+        _format_counts(report["quality_counts"]),
+        "",
+        "Найчастіші стани:",
+        _format_counts(report["state_counts"], empty="немає явних станів"),
+        "",
+        "Найчастіші активності:",
+        _format_counts(report["activity_counts"], empty="немає явних активностей"),
+    ]
+    if report["unnormalized_label_count"]:
+        lines.extend(
+            [
+                "",
+                "Примітки:",
+                f"Ненормалізованих міток, прихованих із топів: {report['unnormalized_label_count']}.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+async def build_period_metrics_chart_png(
+    session: AsyncSession, *, user: User, summary: Summary
+) -> bytes | None:
+    report = await _period_metrics_report(session, user=user, summary=summary)
+    daily_mood = report["daily_mood"]
+    daily_energy = report["daily_energy"]
+    if not any(point is not None for point in [*daily_mood, *daily_energy]):
+        return None
+    return _line_chart_png({"mood": daily_mood, "energy": daily_energy})
+
+
+async def format_period_days_view(session: AsyncSession, *, user: User, summary: Summary) -> str:
+    start_date, end_date = _summary_local_date_range(summary, user.timezone)
+    daily_summaries = await repo.list_summaries_between(
+        session,
+        user_id=user.id,
+        period_type="daily",
+        start=summary.period_start,
+        end=summary.period_end,
+    )
+    entries = await repo.list_entries_between(
+        session,
+        user_id=user.id,
+        start=summary.period_start,
+        end=summary.period_end,
+    )
+    entry_counts = _entry_counts_by_local_date(entries, timezone=user.timezone)
+    lines = [
+        f"Дні періоду: {_period_title(summary).lower()}",
+        f"{start_date.isoformat()} - {end_date.isoformat()}",
+        "",
+    ]
+    if not daily_summaries and not entry_counts:
+        return "\n".join([*lines, "За цей період немає даних."])
+    summaries_by_date = {
+        summary_item.period_start.astimezone(zoneinfo(user.timezone)).date(): summary_item
+        for summary_item in daily_summaries
+    }
+    for current in _date_range(start_date, end_date):
+        count = entry_counts.get(current, 0)
+        daily = summaries_by_date.get(current)
+        if not count and daily is None:
+            continue
+        short_text = _truncate(daily.short_text, 180) if daily else "підсумку немає"
+        lines.append(f"{current.isoformat()}: {_entry_count_text(count)}")
+        lines.append(short_text)
+        lines.append(f"/day {current.isoformat()}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 async def format_cost_report(session: AsyncSession, *, user: User, days: int = 7) -> str:
     since = utc_now() - timedelta(days=days)
     totals = await repo.model_run_cost_totals(session, user_id=user.id, since=since)
@@ -768,6 +894,111 @@ def _format_counts(counts: dict[str, int], empty: str = "немає даних")
 def _metric_entries(entries: list[Entry]) -> list[Entry]:
     excluded_sources = {"correction", "profile_context_update"}
     return [entry for entry in entries if entry.source not in excluded_sources]
+
+
+async def _period_metrics_report(session: AsyncSession, *, user: User, summary: Summary) -> dict[str, Any]:
+    start_date, end_date = _summary_local_date_range(summary, user.timezone)
+    entries = _metric_entries(
+        list(
+            await repo.list_entries_between(
+                session,
+                user_id=user.id,
+                start=summary.period_start,
+                end=summary.period_end,
+            )
+        )
+    )
+    analyses = await repo.list_analyses_for_targets(
+        session,
+        target_type="entry",
+        target_ids=[entry.id for entry in entries],
+    )
+    extraction_by_entry = _latest_feature_results_by_entry(analyses)
+    activity_counts: dict[str, int] = defaultdict(int)
+    state_counts: dict[str, int] = defaultdict(int)
+    quality_counts: dict[str, int] = defaultdict(int)
+    mood_by_day: dict[date, list[int]] = defaultdict(list)
+    energy_by_day: dict[date, list[int]] = defaultdict(list)
+    pleasant_count = 0
+    unnormalized_label_count = 0
+
+    for entry in entries:
+        result = extraction_by_entry.get(str(entry.id), {})
+        for label in result.get("activity_labels") or []:
+            normalized_label = _metrics_label_text(label)
+            if normalized_label is None:
+                unnormalized_label_count += 1
+                continue
+            activity_counts[normalized_label] += 1
+        for label in result.get("state_labels") or []:
+            normalized_label = _metrics_label_text(label)
+            if normalized_label is None:
+                unnormalized_label_count += 1
+                continue
+            state_counts[normalized_label] += 1
+        quality_counts[_data_quality_label(result.get("data_quality"))] += 1
+        entry_date = _entry_local_date(entry, user.timezone)
+        mood = _feature_score(result.get("mood"))
+        energy = _feature_score(result.get("energy"))
+        if entry_date is not None and mood is not None:
+            mood_by_day[entry_date].append(mood)
+        if entry_date is not None and energy is not None:
+            energy_by_day[entry_date].append(energy)
+        pleasant_count += len(result.get("pleasant_moments") or [])
+
+    dates = list(_date_range(start_date, end_date))
+    entry_counts = _entry_counts_by_local_date(entries, timezone=user.timezone)
+    return {
+        "entry_count": len(entries),
+        "active_days": len([count for count in entry_counts.values() if count]),
+        "total_days": len(dates),
+        "pleasant_count": pleasant_count,
+        "daily_mood": [_rounded_average(mood_by_day.get(current, [])) for current in dates],
+        "daily_energy": [_rounded_average(energy_by_day.get(current, [])) for current in dates],
+        "quality_counts": quality_counts,
+        "state_counts": state_counts,
+        "activity_counts": activity_counts,
+        "unnormalized_label_count": unnormalized_label_count,
+    }
+
+
+def _summary_local_date_range(summary: Summary, timezone: str) -> tuple[date, date]:
+    start = _timestamp_in_timezone(summary.period_start, zoneinfo(timezone))
+    end = _timestamp_in_timezone(summary.period_end, zoneinfo(timezone))
+    if start is None or end is None:
+        return date.today(), date.today()
+    return start.date(), end.date()
+
+
+def _date_range(start: date, end: date):
+    current = start
+    while current <= end:
+        yield current
+        current += timedelta(days=1)
+
+
+def _entry_counts_by_local_date(entries, *, timezone: str) -> dict[date, int]:
+    counts: dict[date, int] = defaultdict(int)
+    for entry in entries:
+        entry_date = _entry_local_date(entry, timezone)
+        if entry_date is not None:
+            counts[entry_date] += 1
+    return counts
+
+
+def _entry_local_date(entry: Entry, timezone: str) -> date | None:
+    timestamp = _entry_timestamp(entry, zoneinfo(timezone))
+    return timestamp.date() if timestamp else None
+
+
+def _rounded_average(values: list[int]) -> int | None:
+    if not values:
+        return None
+    return int(round(sum(values) / len(values)))
+
+
+def _period_title(summary: Summary) -> str:
+    return "Тижневий підсумок" if summary.period_type == "weekly" else "Місячний підсумок"
 
 
 def _list_block(title: str, items: list[str]) -> str:

@@ -131,6 +131,24 @@ def day_detail_keyboard(*, day_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def period_detail_keyboard(*, summary_id: str) -> InlineKeyboardMarkup:
+    prefix = f"periodview:{summary_id}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Огляд", callback_data=f"{prefix}:overview"),
+                InlineKeyboardButton(text="Таймлайн", callback_data=f"{prefix}:timeline"),
+            ],
+            [
+                InlineKeyboardButton(text="Метрики", callback_data=f"{prefix}:metrics"),
+                InlineKeyboardButton(text="Графік", callback_data=f"{prefix}:chart"),
+            ],
+            [InlineKeyboardButton(text="Дні періоду", callback_data=f"{prefix}:days")],
+            [InlineKeyboardButton(text="Головне меню", callback_data="nav:home")],
+        ]
+    )
+
+
 def settings_keyboard(*, user_settings: UserSettings) -> InlineKeyboardMarkup:
     paused = snapshots_paused(user_settings)
     active_text = "Увімкнути" if paused else "Пауза"

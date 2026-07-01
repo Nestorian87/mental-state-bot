@@ -12,6 +12,7 @@ from mental_state_bot.bot.handlers import (
     _format_settings_text,
     _frequency_preset_values,
     _help_text,
+    _is_previous_period_query,
     _is_sleep_marker_text,
     _missed_reason_text,
     _parse_day_query,
@@ -25,6 +26,7 @@ from mental_state_bot.bot.keyboards import (
     day_detail_keyboard,
     main_reply_keyboard,
     missed_prompt_keyboard,
+    period_detail_keyboard,
     summary_detail_keyboard,
     voice_transcription_keyboard,
 )
@@ -78,6 +80,8 @@ def test_help_text_mentions_core_commands() -> None:
     assert "/summary" in text
     assert "/day 2026-06-30" in text
     assert "/sleep" in text
+    assert "/week prev" in text
+    assert "/month prev" in text
     assert "/export" in text
     assert "/export_csv" in text
     assert "/export_zip" in text
@@ -142,6 +146,29 @@ def test_day_detail_keyboard_scopes_callbacks_to_day() -> None:
 
     assert f"dayview:{day_id}:story" in callbacks
     assert f"dayview:{day_id}:gaps" in callbacks
+
+
+def test_period_detail_keyboard_scopes_callbacks_to_summary() -> None:
+    summary_id = str(uuid4())
+    keyboard = period_detail_keyboard(summary_id=summary_id)
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert f"periodview:{summary_id}:overview" in callbacks
+    assert f"periodview:{summary_id}:timeline" in callbacks
+    assert f"periodview:{summary_id}:chart" in callbacks
+
+
+def test_previous_period_query_aliases() -> None:
+    assert _is_previous_period_query("prev")
+    assert _is_previous_period_query("попередній")
+    assert _is_previous_period_query("минула")
+    assert not _is_previous_period_query("")
+    assert not _is_previous_period_query("сьогодні")
 
 
 def test_pending_voice_note_payload_roundtrip_keeps_original_transcript() -> None:

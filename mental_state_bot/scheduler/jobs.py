@@ -7,7 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from mental_state_bot.ai.service import AIService
-from mental_state_bot.bot.keyboards import summary_detail_keyboard
+from mental_state_bot.bot.keyboards import period_detail_keyboard, summary_detail_keyboard
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.services.snapshots import maybe_send_scheduled_snapshot
@@ -149,6 +149,7 @@ async def period_summary_tick(
                     await bot.send_message(
                         chat_id=user.chat_id,
                         text="Підсумок за попередній тиждень:\n\n" + weekly.short_text,
+                        reply_markup=period_detail_keyboard(summary_id=str(weekly.id)),
                     )
 
             if current_local.day == 1:
@@ -161,4 +162,5 @@ async def period_summary_tick(
                     await bot.send_message(
                         chat_id=user.chat_id,
                         text="Підсумок за попередній місяць:\n\n" + monthly.short_text,
+                        reply_markup=period_detail_keyboard(summary_id=str(monthly.id)),
                     )
