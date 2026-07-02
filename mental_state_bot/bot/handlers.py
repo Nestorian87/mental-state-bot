@@ -51,6 +51,7 @@ from mental_state_bot.services.analysis_backfill import backfill_entry_features
 from mental_state_bot.services.archive_audit import build_archive_audit, format_archive_audit
 from mental_state_bot.services.exports import export_user_archive
 from mental_state_bot.services.interactions import BotReply, InteractionResult, InteractionService
+from mental_state_bot.services.journal_day import current_journal_date
 from mental_state_bot.services.life_context import (
     answer_life_context_candidate,
     current_life_context_candidate,
@@ -109,7 +110,7 @@ from mental_state_bot.services.review import (
 )
 from mental_state_bot.services.snapshots import send_snapshot_prompt
 from mental_state_bot.services.summaries import SummaryService
-from mental_state_bot.time_utils import local_date, zoneinfo
+from mental_state_bot.time_utils import zoneinfo
 
 logger = logging.getLogger(__name__)
 
@@ -941,7 +942,8 @@ async def menu_callback_handler(
     if action in {"menu:day:today", "menu:day:yesterday"}:
         async with sessionmaker() as session, session.begin():
             user = await _get_or_create_callback_user(session, callback, settings)
-            target_date = local_date(user.timezone)
+            user_settings = await repo.get_user_settings(session, user.id)
+            target_date = await current_journal_date(session, user=user, user_settings=user_settings)
             if action == "menu:day:yesterday":
                 target_date -= timedelta(days=1)
             text, day_id = await _format_day_for_date(session, user=user, target_date=target_date)
@@ -970,11 +972,11 @@ async def menu_callback_handler(
         return
 
     if action == "menu:summaries:day":
+        await callback.answer("Генерую підсумок")
         async with sessionmaker() as session, session.begin():
             user = await _get_or_create_callback_user(session, callback, settings)
             async with _typing(callback.message):
                 summary = await summary_service.generate_today_summary(session, user=user)
-        await callback.answer()
         await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard(summary_id=str(summary.id)))
         return
 
@@ -2123,12 +2125,12 @@ async def sleep_callback_handler(
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
+    await callback.answer("Закриваю день")
     await _clear_inline_keyboard(callback)
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
         async with _typing(callback.message):
             summary = await summary_service.close_today_with_summary(session, user=user)
-    await callback.answer("День закрито")
     await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard(summary_id=str(summary.id)))
 
 
@@ -2150,11 +2152,11 @@ async def day_summary_callback_handler(
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
+    await callback.answer("Генерую підсумок")
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
         async with _typing(callback.message):
             summary = await summary_service.generate_today_summary(session, user=user)
-    await callback.answer()
     await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard(summary_id=str(summary.id)))
 
 

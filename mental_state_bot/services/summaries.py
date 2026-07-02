@@ -13,8 +13,9 @@ from mental_state_bot.ai.service import AIService
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, EmbeddingRecord, Entry, Summary, User
+from mental_state_bot.services.journal_day import current_journal_date
 from mental_state_bot.services.preferences import custom_interaction_style, user_profile_context
-from mental_state_bot.time_utils import local_date, local_now, parse_hhmm, utc_now, zoneinfo
+from mental_state_bot.time_utils import local_now, parse_hhmm, utc_now, zoneinfo
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +29,12 @@ class SummaryService:
         self.ai = ai_service
 
     async def generate_today_summary(self, session: AsyncSession, *, user: User) -> Summary:
+        user_settings = await repo.get_user_settings(session, user.id)
+        target_date = await current_journal_date(session, user=user, user_settings=user_settings)
         day = await repo.get_or_create_day(
             session,
             user_id=user.id,
-            local_date_value=local_date(user.timezone),
+            local_date_value=target_date,
             started_at=utc_now(),
         )
         return await self.generate_day_summary(session, user=user, day=day)
@@ -39,7 +42,12 @@ class SummaryService:
     async def close_today_with_summary(self, session: AsyncSession, *, user: User) -> Summary:
         user_settings = await repo.get_user_settings(session, user.id)
         sleep_time = local_now(user.timezone)
-        target_date = sleep_marker_target_date(sleep_time, active_start=user_settings.active_start)
+        target_date = await current_journal_date(
+            session,
+            user=user,
+            user_settings=user_settings,
+            now=sleep_time,
+        )
         day = await repo.get_or_create_day(
             session,
             user_id=user.id,
@@ -66,7 +74,9 @@ class SummaryService:
     async def generate_yesterday_summary_if_needed(
         self, session: AsyncSession, *, user: User
     ) -> Summary | None:
-        yesterday = local_date(user.timezone) - timedelta(days=1)
+        user_settings = await repo.get_user_settings(session, user.id)
+        today = await current_journal_date(session, user=user, user_settings=user_settings)
+        yesterday = today - timedelta(days=1)
         day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=yesterday)
         if day is None:
             return None
@@ -95,8 +105,12 @@ class SummaryService:
                 ended_at=utc_now(),
                 boundary_kind="sleep_marker",
             )
-        period_start, period_end = _day_period_bounds(day, user.timezone)
         user_settings = await repo.get_user_settings(session, user.id)
+        period_start, period_end = _day_period_bounds(
+            day,
+            user.timezone,
+            active_start=user_settings.active_start,
+        )
         entries = await repo.list_day_entries(session, day_id=day.id)
         missed_prompts = await repo.list_missed_prompts_between(
             session,
@@ -186,7 +200,9 @@ class SummaryService:
         return summary
 
     async def generate_current_week_summary(self, session: AsyncSession, *, user: User) -> Summary:
-        start_date, end_date = current_week_dates(local_date(user.timezone))
+        user_settings = await repo.get_user_settings(session, user.id)
+        today = await current_journal_date(session, user=user, user_settings=user_settings)
+        start_date, end_date = current_week_dates(today)
         return await self.generate_period_summary(
             session,
             user=user,
@@ -196,7 +212,9 @@ class SummaryService:
         )
 
     async def generate_current_month_summary(self, session: AsyncSession, *, user: User) -> Summary:
-        start_date, end_date = current_month_dates(local_date(user.timezone))
+        user_settings = await repo.get_user_settings(session, user.id)
+        today = await current_journal_date(session, user=user, user_settings=user_settings)
+        start_date, end_date = current_month_dates(today)
         return await self.generate_period_summary(
             session,
             user=user,
@@ -206,7 +224,9 @@ class SummaryService:
         )
 
     async def generate_previous_week_summary(self, session: AsyncSession, *, user: User) -> Summary:
-        start_date, end_date = previous_week_dates(local_date(user.timezone))
+        user_settings = await repo.get_user_settings(session, user.id)
+        today = await current_journal_date(session, user=user, user_settings=user_settings)
+        start_date, end_date = previous_week_dates(today)
         return await self.generate_period_summary(
             session,
             user=user,
@@ -216,7 +236,9 @@ class SummaryService:
         )
 
     async def generate_previous_month_summary(self, session: AsyncSession, *, user: User) -> Summary:
-        start_date, end_date = previous_month_dates(local_date(user.timezone))
+        user_settings = await repo.get_user_settings(session, user.id)
+        today = await current_journal_date(session, user=user, user_settings=user_settings)
+        start_date, end_date = previous_month_dates(today)
         return await self.generate_period_summary(
             session,
             user=user,
@@ -228,7 +250,9 @@ class SummaryService:
     async def generate_previous_week_summary_if_needed(
         self, session: AsyncSession, *, user: User
     ) -> Summary | None:
-        start_date, end_date = previous_week_dates(local_date(user.timezone))
+        user_settings = await repo.get_user_settings(session, user.id)
+        today = await current_journal_date(session, user=user, user_settings=user_settings)
+        start_date, end_date = previous_week_dates(today)
         period_start, period_end = _date_period_bounds(start_date, end_date, user.timezone)
         if await repo.period_summary_exists(
             session,
@@ -248,7 +272,9 @@ class SummaryService:
     async def generate_previous_month_summary_if_needed(
         self, session: AsyncSession, *, user: User
     ) -> Summary | None:
-        start_date, end_date = previous_month_dates(local_date(user.timezone))
+        user_settings = await repo.get_user_settings(session, user.id)
+        today = await current_journal_date(session, user=user, user_settings=user_settings)
+        start_date, end_date = previous_month_dates(today)
         period_start, period_end = _date_period_bounds(start_date, end_date, user.timezone)
         if await repo.period_summary_exists(
             session,
@@ -492,10 +518,11 @@ async def _snapshot_conversations_from_entries(
     return conversations
 
 
-def _day_period_bounds(day: Day, timezone: str) -> tuple[datetime, datetime]:
+def _day_period_bounds(day: Day, timezone: str, *, active_start: str = "00:00") -> tuple[datetime, datetime]:
     tz = zoneinfo(timezone)
-    start = datetime.combine(day.local_date, time.min, tzinfo=tz)
-    end = datetime.combine(day.local_date, time.max, tzinfo=tz)
+    start_time = parse_hhmm(active_start)
+    start = datetime.combine(day.local_date, start_time, tzinfo=tz)
+    end = start + timedelta(days=1) - timedelta(microseconds=1)
     return start, end
 
 

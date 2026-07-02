@@ -87,12 +87,18 @@ async def test_sleep_summary_after_midnight_closes_previous_journal_day(monkeypa
         calls["day_dates"].append(local_date_value)
         return day
 
+    async def get_day_by_date(session, *, user_id, local_date_value):
+        assert user_id == user.id
+        assert local_date_value == date(2026, 6, 30)
+        return SimpleNamespace(id=day.id, local_date=date(2026, 6, 30), ended_at=None)
+
     async def add_entry(session, **kwargs):
         calls["entries"].append(kwargs)
         return SimpleNamespace(id=uuid4())
 
     monkeypatch.setattr(summaries_module.repo, "get_user_settings", get_user_settings)
     monkeypatch.setattr(summaries_module.repo, "get_or_create_day", get_or_create_day)
+    monkeypatch.setattr(summaries_module.repo, "get_day_by_date", get_day_by_date)
     monkeypatch.setattr(summaries_module.repo, "add_entry", add_entry)
     monkeypatch.setattr(summaries_module, "local_now", lambda timezone: sleep_time)
     monkeypatch.setattr(summaries_module, "utc_now", lambda: datetime(2026, 6, 30, 22, 31, tzinfo=UTC))
@@ -151,7 +157,15 @@ async def test_yesterday_summary_auto_closes_uncertain_day(monkeypatch) -> None:
     async def summary_exists(session, *, user_id, day_id, period_type):
         return False
 
-    monkeypatch.setattr(summaries_module, "local_date", lambda timezone: date(2026, 6, 29))
+    async def get_user_settings(session, user_id):
+        assert user_id == user.id
+        return SimpleNamespace(active_start="09:00")
+
+    async def current_journal_date(session, *, user, user_settings):
+        return date(2026, 6, 29)
+
+    monkeypatch.setattr(summaries_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(summaries_module, "current_journal_date", current_journal_date)
     monkeypatch.setattr(summaries_module.repo, "get_day_by_date", get_day_by_date)
     monkeypatch.setattr(summaries_module.repo, "list_day_entries", list_day_entries)
     monkeypatch.setattr(summaries_module.repo, "close_day", close_day)

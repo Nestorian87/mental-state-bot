@@ -21,7 +21,8 @@ from mental_state_bot.db.models import (
     User,
     UserSettings,
 )
-from mental_state_bot.time_utils import local_date, parse_hhmm, utc_now, zoneinfo
+from mental_state_bot.services.journal_day import current_journal_date
+from mental_state_bot.time_utils import parse_hhmm, utc_now, zoneinfo
 
 
 @dataclass(frozen=True)
@@ -30,8 +31,14 @@ class PhotoMoment:
     entry: Entry
 
 
+async def _current_journal_date(session: AsyncSession, *, user: User) -> date:
+    user_settings = await repo.get_user_settings(session, user.id)
+    return await current_journal_date(session, user=user, user_settings=user_settings)
+
+
 async def format_today_view(session: AsyncSession, *, user: User, limit: int = 18) -> str:
-    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
+    target_date = await _current_journal_date(session, user=user)
+    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=target_date)
     if day is None:
         return "За сьогодні ще немає записів."
     return await format_day_view(session, user=user, day=day, limit=limit, title="Сьогодні")
@@ -76,7 +83,8 @@ async def format_day_view(
 
 
 async def format_raw_entries_view(session: AsyncSession, *, user: User, limit: int = 30) -> str:
-    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
+    target_date = await _current_journal_date(session, user=user)
+    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=target_date)
     if day is None:
         return "За сьогодні ще немає сирих записів."
     return await format_raw_entries_for_day(session, user=user, day=day, limit=limit, title="сьогодні")
@@ -101,7 +109,8 @@ async def format_raw_entries_for_day(
 
 
 async def format_metrics_view(session: AsyncSession, *, user: User) -> str:
-    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
+    target_date = await _current_journal_date(session, user=user)
+    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=target_date)
     if day is None:
         return "За сьогодні ще немає метрик."
     return await format_metrics_for_day(session, user=user, day=day, title="сьогодні")
@@ -191,7 +200,8 @@ async def format_metrics_for_day(
 
 
 async def build_metrics_chart_png(session: AsyncSession, *, user: User) -> bytes | None:
-    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
+    target_date = await _current_journal_date(session, user=user)
+    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=target_date)
     if day is None:
         return None
     return await build_metrics_chart_png_for_day(session, user=user, day=day)
@@ -223,7 +233,8 @@ async def build_metrics_chart_png_for_day(session: AsyncSession, *, user: User, 
 
 
 async def get_today_photo_moments(session: AsyncSession, *, user: User) -> list[PhotoMoment]:
-    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=local_date(user.timezone))
+    target_date = await _current_journal_date(session, user=user)
+    day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=target_date)
     if day is None:
         return []
     return await get_photo_moments_for_day(session, day=day)
@@ -265,7 +276,7 @@ def format_photo_moments_view(
 
 
 async def format_gaps_view(session: AsyncSession, *, user: User) -> str:
-    today = local_date(user.timezone)
+    today = await _current_journal_date(session, user=user)
     day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=today)
     return await format_gaps_for_day(session, user=user, day=day, target_date=today, title="Прогалини сьогодні")
 
@@ -278,11 +289,12 @@ async def format_gaps_for_day(
     target_date: date | None = None,
     title: str | None = None,
 ) -> str:
-    report_date = target_date or (day.local_date if day else local_date(user.timezone))
+    report_date = target_date or (day.local_date if day else await _current_journal_date(session, user=user))
     user_settings = await repo.get_user_settings(session, user.id)
     window_start, window_end = _active_window(report_date, user.timezone, user_settings)
     now_local = utc_now().astimezone(zoneinfo(user.timezone))
-    coverage_end = min(now_local, window_end) if report_date == local_date(user.timezone) else window_end
+    current_date = await current_journal_date(session, user=user, user_settings=user_settings)
+    coverage_end = min(now_local, window_end) if report_date == current_date else window_end
 
     entries = list(await repo.list_day_entries(session, day_id=day.id)) if day else []
     missed_prompts = list(

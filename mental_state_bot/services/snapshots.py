@@ -12,6 +12,7 @@ from mental_state_bot.bot.keyboards import missed_prompt_keyboard, snapshot_init
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, Snapshot, User, UserSettings
+from mental_state_bot.services.journal_day import current_journal_date
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
     life_context_items,
@@ -19,7 +20,7 @@ from mental_state_bot.services.preferences import (
     user_profile_context,
 )
 from mental_state_bot.services.semantic_context import semantic_memory_context
-from mental_state_bot.time_utils import local_date, parse_hhmm, utc_now, zoneinfo
+from mental_state_bot.time_utils import parse_hhmm, utc_now, zoneinfo
 
 
 async def maybe_send_scheduled_snapshot(
@@ -35,10 +36,11 @@ async def maybe_send_scheduled_snapshot(
     if not _is_active_time(now, user.timezone, user_settings):
         return False
 
+    target_date = await current_journal_date(session, user=user, user_settings=user_settings, now=now)
     today = await repo.get_day_by_date(
         session,
         user_id=user.id,
-        local_date_value=local_date(user.timezone),
+        local_date_value=target_date,
     )
     if today and today.ended_at:
         open_snapshot = await repo.get_open_snapshot(session, user_id=user.id)
@@ -107,7 +109,7 @@ async def send_snapshot_prompt(
     day = await repo.get_or_create_day(
         session,
         user_id=user.id,
-        local_date_value=local_date(user.timezone),
+        local_date_value=await current_journal_date(session, user=user, user_settings=user_settings, now=now),
         started_at=now,
     )
     recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=6)

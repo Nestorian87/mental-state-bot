@@ -12,13 +12,14 @@ from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Day, Entry, Snapshot, User, UserSettings
 from mental_state_bot.services.analysis_backfill import analyze_entry_features
+from mental_state_bot.services.journal_day import current_journal_date
 from mental_state_bot.services.preferences import (
     custom_interaction_style,
     life_context_items,
     user_profile_context,
 )
 from mental_state_bot.services.semantic_context import semantic_memory_context
-from mental_state_bot.time_utils import local_date, local_now, utc_now
+from mental_state_bot.time_utils import local_now, utc_now
 
 
 @dataclass(frozen=True)
@@ -515,10 +516,12 @@ class InteractionService:
         }
 
     async def _current_day(self, session: AsyncSession, user: User) -> Day:
+        user_settings = await repo.get_user_settings(session, user.id)
+        target_date = await current_journal_date(session, user=user, user_settings=user_settings)
         return await repo.get_or_create_day(
             session,
             user_id=user.id,
-            local_date_value=local_date(user.timezone),
+            local_date_value=target_date,
             started_at=utc_now(),
         )
 
