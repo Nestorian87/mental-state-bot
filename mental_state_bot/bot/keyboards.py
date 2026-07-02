@@ -90,6 +90,23 @@ def sleep_confirmation_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def sleep_reflection_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Важкий", callback_data="sleep:reflect:hard"),
+                InlineKeyboardButton(text="Змішаний", callback_data="sleep:reflect:mixed"),
+            ],
+            [
+                InlineKeyboardButton(text="Нормальний", callback_data="sleep:reflect:okay"),
+                InlineKeyboardButton(text="Добрий", callback_data="sleep:reflect:good"),
+            ],
+            [InlineKeyboardButton(text="Написати своє", callback_data="sleep:reflect:custom")],
+            [InlineKeyboardButton(text="Пропустити", callback_data="sleep:reflect:skip")],
+        ]
+    )
+
+
 def missed_prompt_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

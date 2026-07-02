@@ -130,6 +130,53 @@ async def test_sleep_summary_after_midnight_closes_previous_journal_day(monkeypa
     assert calls["entries"][0]["meta"]["sleep_marker_target_date"] == "2026-06-30"
 
 
+async def test_sleep_summary_stores_day_reflection_before_sleep_marker(monkeypatch) -> None:
+    class FakeSummaryService(SummaryService):
+        async def generate_day_summary(self, session, *, user, day, close_day=False):
+            return SimpleNamespace(short_text="Закрив із оцінкою.")
+
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
+    day = SimpleNamespace(id=uuid4(), local_date=date(2026, 7, 1))
+    sleep_time = datetime(2026, 7, 1, 23, 10, tzinfo=ZoneInfo("Europe/Kyiv"))
+    calls = {"entries": []}
+
+    async def get_user_settings(session, user_id):
+        return SimpleNamespace(active_start="09:00")
+
+    async def get_or_create_day(session, *, user_id, local_date_value, started_at):
+        return day
+
+    async def get_day_by_date(session, *, user_id, local_date_value):
+        return SimpleNamespace(id=day.id, local_date=day.local_date, ended_at=None)
+
+    async def add_entry(session, **kwargs):
+        calls["entries"].append(kwargs)
+        return SimpleNamespace(id=uuid4())
+
+    monkeypatch.setattr(summaries_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(summaries_module.repo, "get_or_create_day", get_or_create_day)
+    monkeypatch.setattr(summaries_module.repo, "get_day_by_date", get_day_by_date)
+    monkeypatch.setattr(summaries_module.repo, "add_entry", add_entry)
+    monkeypatch.setattr(summaries_module, "local_now", lambda timezone: sleep_time)
+
+    service = FakeSummaryService(
+        SimpleNamespace(embeddings_enabled=False, embedding_api_key=None),
+        ai_service=None,
+    )
+
+    await service.close_today_with_summary(
+        object(),
+        user=user,
+        day_reflection="  день був дивний, але важливий  ",
+        day_reflection_kind="free",
+    )
+
+    assert [entry["source"] for entry in calls["entries"]] == ["day_reflection", "sleep_marker"]
+    assert calls["entries"][0]["raw_text"] == "Оцінка дня: день був дивний, але важливий"
+    assert calls["entries"][0]["meta"]["day_reflection"] == "день був дивний, але важливий"
+    assert calls["entries"][0]["meta"]["day_reflection_kind"] == "free"
+
+
 async def test_yesterday_summary_auto_closes_uncertain_day(monkeypatch) -> None:
     class FakeSummaryService(SummaryService):
         async def generate_day_summary(self, session, *, user, day, close_day=False):

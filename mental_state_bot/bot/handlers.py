@@ -39,6 +39,7 @@ from mental_state_bot.bot.keyboards import (
     settings_rhythm_keyboard,
     settings_style_keyboard,
     sleep_confirmation_keyboard,
+    sleep_reflection_keyboard,
     snapshot_clarification_keyboard,
     summaries_menu_keyboard,
     summary_detail_keyboard,
@@ -1635,6 +1636,7 @@ async def voice_transcription_callback_handler(
     sessionmaker: async_sessionmaker[AsyncSession],
     interaction_service: InteractionService,
     memory_service: MemoryService,
+    summary_service: SummaryService,
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
@@ -1678,6 +1680,7 @@ async def voice_transcription_callback_handler(
                     user=user,
                     user_settings=user_settings,
                     interaction_service=interaction_service,
+                    summary_service=summary_service,
                 )
             entry_id = result.entry_id
             should_embed = result.should_embed_entry
@@ -1894,6 +1897,8 @@ async def entry_handler(
                 target_hint = (
                     "\n\nПісля підтвердження використаю це як відповідь на питання про живий контекст."
                     if _voice_target_pending_kind(pending_kind) == "life_context_free_answer"
+                    else "\n\nПісля підтвердження використаю це як твою оцінку дня і закрию день."
+                    if _voice_target_pending_kind(pending_kind) == "sleep_reflection"
                     else ""
                 )
                 replies = [
@@ -1974,6 +1979,7 @@ async def entry_handler(
                     text=text,
                     message=message,
                     interaction_service=interaction_service,
+                    summary_service=summary_service,
                 )
             entry_id = result.entry_id
             should_embed = result.should_embed_entry
@@ -2134,16 +2140,60 @@ async def sleep_callback_handler(
     callback: CallbackQuery,
     settings: Settings,
     sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    await callback.answer()
+    await _clear_inline_keyboard(callback)
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        user_settings = await repo.get_user_settings(session, user.id)
+        await repo.update_user_settings(
+            session,
+            user_id=user.id,
+            values={"settings_json": settings_json_with_pending_input(user_settings, "sleep_reflection")},
+        )
+    await callback.message.answer(_sleep_reflection_prompt(), reply_markup=sleep_reflection_keyboard())
+
+
+@router.callback_query(F.data.startswith("sleep:reflect:"))
+async def sleep_reflection_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
     summary_service: SummaryService,
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
+    action = (callback.data or "").rsplit(":", maxsplit=1)[-1]
+    if action == "custom":
+        await callback.answer()
+        await _clear_inline_keyboard(callback)
+        await callback.message.answer("Напиши одним повідомленням, як би ти сам оцінив цей день.")
+        return
+
+    reflection = _sleep_reflection_text(action)
+    if reflection is None:
+        await callback.answer("Не впізнав оцінку", show_alert=True)
+        return
+
     await callback.answer("Закриваю день")
     await _clear_inline_keyboard(callback)
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
+        user_settings = await repo.get_user_settings(session, user.id)
+        await repo.update_user_settings(
+            session,
+            user_id=user.id,
+            values={"settings_json": settings_json_without_pending_input(user_settings)},
+        )
         async with _typing(callback.message):
-            summary = await summary_service.close_today_with_summary(session, user=user)
+            summary = await summary_service.close_today_with_summary(
+                session,
+                user=user,
+                day_reflection=reflection,
+                day_reflection_kind=action,
+            )
     await callback.message.answer(summary.short_text, reply_markup=summary_detail_keyboard(summary_id=str(summary.id)))
 
 
@@ -2193,6 +2243,7 @@ async def _handle_pending_input(
     text: str,
     message: Message,
     interaction_service: InteractionService,
+    summary_service: SummaryService,
 ) -> InteractionResult:
     if pending_kind == "custom_style":
         next_settings_json = settings_json_with_custom_interaction_style(user_settings, text)
@@ -2229,6 +2280,22 @@ async def _handle_pending_input(
             user_settings=user_settings,
             text=text,
         )
+    if pending_kind == "sleep_reflection":
+        await repo.update_user_settings(
+            session,
+            user_id=user.id,
+            values={"settings_json": settings_json_without_pending_input(user_settings)},
+        )
+        summary = await summary_service.close_today_with_summary(
+            session,
+            user=user,
+            day_reflection=text,
+            day_reflection_kind="free",
+        )
+        return InteractionResult(
+            replies=[BotReply(summary.short_text, keyboard=f"summary_detail:{summary.id}")],
+            snapshot_closed=True,
+        )
     if pending_kind == "correction":
         target_entry_id = _uuid_or_none(pending_correction_entry_id(user_settings))
         await repo.update_user_settings(
@@ -2250,6 +2317,7 @@ async def _handle_pending_input(
             user=user,
             user_settings=user_settings,
             interaction_service=interaction_service,
+            summary_service=summary_service,
             corrected_text=text,
             fallback_message_id=message.message_id,
             fallback_reply_to_message_id=(
@@ -2270,6 +2338,7 @@ async def _confirm_pending_voice_transcript(
     user,
     user_settings: UserSettings,
     interaction_service: InteractionService,
+    summary_service: SummaryService | None = None,
     corrected_text: str | None = None,
     fallback_message_id: int | None = None,
     fallback_reply_to_message_id: int | None = None,
@@ -2300,6 +2369,27 @@ async def _confirm_pending_voice_transcript(
             user_settings=user_settings,
             text=text,
             clear_pending_voice=True,
+        )
+    if pending.get("target_pending_kind") == "sleep_reflection":
+        if summary_service is None:
+            return InteractionResult(
+                replies=[BotReply("Не можу закрити день із голосового без сервісу підсумків.")],
+                snapshot_closed=True,
+            )
+        await repo.update_user_settings(
+            session,
+            user_id=user.id,
+            values={"settings_json": settings_json_without_pending_voice_transcript(user_settings)},
+        )
+        summary = await summary_service.close_today_with_summary(
+            session,
+            user=user,
+            day_reflection=text,
+            day_reflection_kind="voice",
+        )
+        return InteractionResult(
+            replies=[BotReply(summary.short_text, keyboard=f"summary_detail:{summary.id}")],
+            snapshot_closed=True,
         )
 
     result = await interaction_service.handle_text_entry(
@@ -2531,7 +2621,7 @@ def _pending_voice_note_payload(
 
 
 def _voice_target_pending_kind(pending_kind: str | None) -> str | None:
-    return pending_kind if pending_kind in {"life_context_free_answer"} else None
+    return pending_kind if pending_kind in {"life_context_free_answer", "sleep_reflection"} else None
 
 
 def _voice_note_from_pending(pending: dict[str, object], *, text: str) -> VoiceNoteTranscription:
@@ -2814,9 +2904,29 @@ def _inline_reply_keyboard(kind: str | None):
         return manual_entry_confirmation_keyboard()
     if kind == "sleep_confirm":
         return sleep_confirmation_keyboard()
+    if kind and kind.startswith("summary_detail:"):
+        summary_id = kind.split(":", maxsplit=1)[1]
+        return summary_detail_keyboard(summary_id=summary_id)
     if kind == "life_context_continue":
         return life_context_continue_keyboard()
     return None
+
+
+def _sleep_reflection_prompt() -> str:
+    return (
+        "Перед тим як закрити день: як би ти сам оцінив цей день?\n\n"
+        "Можна натиснути варіант або написати своїми словами."
+    )
+
+
+def _sleep_reflection_text(action: str) -> str | None:
+    return {
+        "hard": "День був важкий.",
+        "mixed": "День був змішаний.",
+        "okay": "День був нормальний.",
+        "good": "День був добрий.",
+        "skip": "",
+    }.get(action)
 
 
 def _correction_target_from_callback(callback_data: str) -> UUID | None:

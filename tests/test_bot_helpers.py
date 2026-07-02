@@ -43,6 +43,7 @@ from mental_state_bot.bot.keyboards import (
     settings_capture_keyboard,
     settings_rhythm_keyboard,
     settings_style_keyboard,
+    sleep_reflection_keyboard,
     summary_detail_keyboard,
     voice_transcription_keyboard,
 )
@@ -142,6 +143,25 @@ def test_voice_transcription_keyboard_exposes_confirm_fix_cancel() -> None:
 
     assert callbacks == {"voice:confirm", "voice:fix", "voice:cancel"}
     assert {callback.split(":", maxsplit=1)[1] for callback in callbacks} == VOICE_TRANSCRIPTION_ACTIONS
+
+
+def test_sleep_reflection_keyboard_exposes_presets_custom_and_skip() -> None:
+    keyboard = sleep_reflection_keyboard()
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert callbacks == {
+        "sleep:reflect:hard",
+        "sleep:reflect:mixed",
+        "sleep:reflect:okay",
+        "sleep:reflect:good",
+        "sleep:reflect:custom",
+        "sleep:reflect:skip",
+    }
 
 
 def test_manual_entry_confirmation_keyboard_exposes_save_and_ignore() -> None:

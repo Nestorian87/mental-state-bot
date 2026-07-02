@@ -19,6 +19,7 @@ PENDING_INPUT_KINDS = {
     "profile_context",
     "correction",
     "life_context_free_answer",
+    "sleep_reflection",
     "voice_transcript",
     "voice_transcript_fix",
 }

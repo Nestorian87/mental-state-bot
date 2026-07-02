@@ -39,7 +39,14 @@ class SummaryService:
         )
         return await self.generate_day_summary(session, user=user, day=day)
 
-    async def close_today_with_summary(self, session: AsyncSession, *, user: User) -> Summary:
+    async def close_today_with_summary(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        day_reflection: str | None = None,
+        day_reflection_kind: str | None = None,
+    ) -> Summary:
         user_settings = await repo.get_user_settings(session, user.id)
         sleep_time = local_now(user.timezone)
         target_date = await current_journal_date(
@@ -54,6 +61,24 @@ class SummaryService:
             local_date_value=target_date,
             started_at=utc_now(),
         )
+        normalized_reflection = " ".join((day_reflection or "").split())
+        if normalized_reflection:
+            await repo.add_entry(
+                session,
+                user_id=user.id,
+                day_id=day.id,
+                snapshot_id=None,
+                source="day_reflection",
+                raw_text=f"Оцінка дня: {normalized_reflection}",
+                telegram_message_id=None,
+                reply_to_message_id=None,
+                local_timestamp=sleep_time,
+                meta={
+                    "day_reflection": normalized_reflection,
+                    "day_reflection_kind": day_reflection_kind or "free",
+                    "sleep_marker_target_date": target_date.isoformat(),
+                },
+            )
         await repo.add_entry(
             session,
             user_id=user.id,
