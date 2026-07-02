@@ -81,6 +81,58 @@ async def test_scheduled_snapshot_does_not_prompt_after_day_is_closed(monkeypatc
     assert calls["sent"] == 0
 
 
+async def test_scheduled_snapshot_waits_after_late_answer(monkeypatch) -> None:
+    user = SimpleNamespace(id="user-id", timezone="Europe/Kyiv")
+    user_settings = SimpleNamespace(
+        active_start="09:00",
+        active_end="23:30",
+        min_interval_minutes=20,
+        max_interval_minutes=20,
+        reminder_delay_minutes=25,
+        settings_json={},
+    )
+    now = datetime(2026, 6, 29, 12, 0, tzinfo=ZoneInfo("UTC"))
+    last_snapshot = SimpleNamespace(
+        prompted_at=datetime(2026, 6, 29, 11, 0, tzinfo=ZoneInfo("UTC")),
+        closed_at=datetime(2026, 6, 29, 11, 55, tzinfo=ZoneInfo("UTC")),
+    )
+    calls = {"sent": 0}
+
+    async def get_user_settings(session, user_id):
+        return user_settings
+
+    async def get_day_by_date(session, *, user_id, local_date_value):
+        return None
+
+    async def get_open_snapshot(session, *, user_id):
+        return None
+
+    async def get_last_snapshot(session, *, user_id):
+        return last_snapshot
+
+    async def send_snapshot_prompt(*args, **kwargs):
+        calls["sent"] += 1
+        return True
+
+    monkeypatch.setattr(snapshots_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(snapshots_module.repo, "get_day_by_date", get_day_by_date)
+    monkeypatch.setattr(snapshots_module.repo, "get_open_snapshot", get_open_snapshot)
+    monkeypatch.setattr(snapshots_module.repo, "get_last_snapshot", get_last_snapshot)
+    monkeypatch.setattr(snapshots_module, "send_snapshot_prompt", send_snapshot_prompt)
+    monkeypatch.setattr(snapshots_module, "utc_now", lambda: now)
+
+    sent = await snapshots_module.maybe_send_scheduled_snapshot(
+        object(),
+        bot=object(),
+        settings=SimpleNamespace(photo_prompt_chance=0.18),
+        ai_service=object(),
+        user=user,
+    )
+
+    assert sent is False
+    assert calls["sent"] == 0
+
+
 def test_snapshot_question_context_includes_photo_and_body_preferences() -> None:
     entry = SimpleNamespace(
         created_at=datetime(2026, 6, 29, 10, 0),

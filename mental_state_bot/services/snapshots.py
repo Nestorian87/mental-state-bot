@@ -62,8 +62,9 @@ async def maybe_send_scheduled_snapshot(
         )
 
     last_snapshot = await repo.get_last_snapshot(session, user_id=user.id)
-    if last_snapshot and last_snapshot.prompted_at:
-        minutes_since = (now - last_snapshot.prompted_at).total_seconds() / 60
+    last_snapshot_activity = _last_snapshot_activity_at(last_snapshot)
+    if last_snapshot_activity:
+        minutes_since = (now - last_snapshot_activity).total_seconds() / 60
         threshold = random.randint(user_settings.min_interval_minutes, user_settings.max_interval_minutes)
         if minutes_since < threshold:
             return False
@@ -295,6 +296,12 @@ async def _handle_open_snapshot(
     if has_reminder and minutes_since >= user_settings.reminder_delay_minutes * 2:
         await repo.close_snapshot(session, snapshot_id=snapshot_id, status="missed")
     return False
+
+
+def _last_snapshot_activity_at(snapshot: Snapshot | None) -> datetime | None:
+    if snapshot is None:
+        return None
+    return snapshot.closed_at or snapshot.prompted_at
 
 
 def _is_active_time(now_utc: datetime, timezone: str, user_settings: UserSettings) -> bool:
