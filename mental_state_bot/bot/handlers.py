@@ -248,7 +248,9 @@ async def day_command_handler(
     query = _command_argument(message.text or "")
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
-        target_date = _parse_day_query(query, user.timezone)
+        user_settings = await repo.get_user_settings(session, user.id)
+        today = await current_journal_date(session, user=user, user_settings=user_settings)
+        target_date = _parse_day_query(query, user.timezone, today=today)
         if target_date is None:
             await message.answer("Формат: /day 2026-06-30. Також можна: /day вчора або /day сьогодні.")
             return
@@ -1912,7 +1914,8 @@ async def entry_handler(
                 user_id=user.id,
                 values={"settings_json": settings_json_without_pending_input(user_settings)},
             )
-            target_date = _parse_day_query(text, user.timezone)
+            today = await current_journal_date(session, user=user, user_settings=user_settings)
+            target_date = _parse_day_query(text, user.timezone, today=today)
             if target_date is None:
                 await message.answer(
                     "Не впізнав дату. Напиши, наприклад: 2026-06-30, 30.06.2026, сьогодні або вчора.",
@@ -2969,14 +2972,15 @@ async def _edit_or_answer_menu(callback: CallbackQuery, text: str, reply_markup)
         await callback.message.answer(text, reply_markup=reply_markup)
 
 
-def _parse_day_query(query: str, timezone: str) -> date | None:
+def _parse_day_query(query: str, timezone: str, *, today: date | None = None) -> date | None:
     normalized = " ".join(query.strip().lower().split())
     if not normalized:
         return None
+    base_date = today or datetime.now(tz=zoneinfo(timezone)).date()
     if normalized in {"сьогодні", "today"}:
-        return datetime.now(tz=zoneinfo(timezone)).date()
+        return base_date
     if normalized in {"вчора", "yesterday"}:
-        return datetime.now(tz=zoneinfo(timezone)).date() - timedelta(days=1)
+        return base_date - timedelta(days=1)
     try:
         return date.fromisoformat(normalized)
     except ValueError:

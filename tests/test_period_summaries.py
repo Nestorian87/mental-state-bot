@@ -9,6 +9,7 @@ import mental_state_bot.services.summaries as summaries_module
 from mental_state_bot.services.review import format_period_summary
 from mental_state_bot.services.summaries import (
     SummaryService,
+    _date_period_bounds,
     _entries_query_text,
     _semantic_records_context,
     auto_morning_boundary_end,
@@ -64,6 +65,18 @@ def test_sleep_marker_after_active_start_targets_current_day() -> None:
     sleep_time = datetime(2026, 7, 1, 23, 31, tzinfo=ZoneInfo("Europe/Kyiv"))
 
     assert sleep_marker_target_date(sleep_time, active_start="09:00") == date(2026, 7, 1)
+
+
+def test_period_bounds_follow_journal_active_start() -> None:
+    start, end = _date_period_bounds(
+        date(2026, 7, 1),
+        date(2026, 7, 7),
+        "Europe/Kyiv",
+        active_start="09:00",
+    )
+
+    assert start == datetime(2026, 7, 1, 9, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+    assert end == datetime(2026, 7, 8, 8, 59, 59, 999999, tzinfo=ZoneInfo("Europe/Kyiv"))
 
 
 async def test_sleep_summary_after_midnight_closes_previous_journal_day(monkeypatch) -> None:

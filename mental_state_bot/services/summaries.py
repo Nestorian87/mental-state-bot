@@ -186,6 +186,9 @@ class SummaryService:
             user_id=user.id,
             context=context,
         )
+        details = daily.model_dump()
+        details["journal_date"] = day.local_date.isoformat()
+        details["journal_active_start"] = user_settings.active_start
         summary = await repo.upsert_summary(
             session,
             user_id=user.id,
@@ -194,7 +197,7 @@ class SummaryService:
             period_start=period_start,
             period_end=period_end,
             short_text=daily.short_text,
-            details=daily.model_dump(),
+            details=details,
             model_run_id=model_run_id,
         )
         return summary
@@ -253,7 +256,12 @@ class SummaryService:
         user_settings = await repo.get_user_settings(session, user.id)
         today = await current_journal_date(session, user=user, user_settings=user_settings)
         start_date, end_date = previous_week_dates(today)
-        period_start, period_end = _date_period_bounds(start_date, end_date, user.timezone)
+        period_start, period_end = _date_period_bounds(
+            start_date,
+            end_date,
+            user.timezone,
+            active_start=user_settings.active_start,
+        )
         if await repo.period_summary_exists(
             session,
             user_id=user.id,
@@ -275,7 +283,12 @@ class SummaryService:
         user_settings = await repo.get_user_settings(session, user.id)
         today = await current_journal_date(session, user=user, user_settings=user_settings)
         start_date, end_date = previous_month_dates(today)
-        period_start, period_end = _date_period_bounds(start_date, end_date, user.timezone)
+        period_start, period_end = _date_period_bounds(
+            start_date,
+            end_date,
+            user.timezone,
+            active_start=user_settings.active_start,
+        )
         if await repo.period_summary_exists(
             session,
             user_id=user.id,
@@ -300,8 +313,13 @@ class SummaryService:
         start_date: date,
         end_date: date,
     ) -> Summary:
-        period_start, period_end = _date_period_bounds(start_date, end_date, user.timezone)
         user_settings = await repo.get_user_settings(session, user.id)
+        period_start, period_end = _date_period_bounds(
+            start_date,
+            end_date,
+            user.timezone,
+            active_start=user_settings.active_start,
+        )
         entries = await repo.list_entries_between(
             session, user_id=user.id, start=period_start, end=period_end
         )
@@ -312,11 +330,16 @@ class SummaryService:
             start=period_start,
             end=period_end,
         )
-        previous_start, previous_end = previous_comparable_period(
+        previous_start_date, previous_end_date = previous_comparable_period_dates(
             start_date=start_date,
             end_date=end_date,
             period_type=period_type,
-            timezone=user.timezone,
+        )
+        previous_start, previous_end = _date_period_bounds(
+            previous_start_date,
+            previous_end_date,
+            user.timezone,
+            active_start=user_settings.active_start,
         )
         previous_summaries = await repo.list_summaries_between(
             session,
@@ -343,6 +366,8 @@ class SummaryService:
 
         context = {
             "period_type": period_type,
+            "journal_start_date": start_date.isoformat(),
+            "journal_end_date": end_date.isoformat(),
             "period_start": period_start.isoformat(),
             "period_end": period_end.isoformat(),
             "user_profile_context": user_profile_context(user_settings),
@@ -397,6 +422,9 @@ class SummaryService:
             period_type=period_type,
             context=context,
         )
+        details = period_summary.model_dump()
+        details["journal_start_date"] = start_date.isoformat()
+        details["journal_end_date"] = end_date.isoformat()
         return await repo.upsert_summary(
             session,
             user_id=user.id,
@@ -405,7 +433,7 @@ class SummaryService:
             period_start=period_start,
             period_end=period_end,
             short_text=period_summary.short_text,
-            details=period_summary.model_dump(),
+            details=details,
             model_run_id=model_run_id,
         )
 
@@ -560,10 +588,17 @@ def sleep_marker_target_date(sleep_time: datetime, *, active_start: str) -> date
     return target_date
 
 
-def _date_period_bounds(start_date: date, end_date: date, timezone: str) -> tuple[datetime, datetime]:
+def _date_period_bounds(
+    start_date: date,
+    end_date: date,
+    timezone: str,
+    *,
+    active_start: str = "00:00",
+) -> tuple[datetime, datetime]:
     tz = zoneinfo(timezone)
-    start = datetime.combine(start_date, time.min, tzinfo=tz)
-    end = datetime.combine(end_date, time.max, tzinfo=tz)
+    start_time = parse_hhmm(active_start)
+    start = datetime.combine(start_date, start_time, tzinfo=tz)
+    end = datetime.combine(end_date + timedelta(days=1), start_time, tzinfo=tz) - timedelta(microseconds=1)
     return start, end
 
 
@@ -589,16 +624,16 @@ def previous_month_dates(today: date) -> tuple[date, date]:
     return current_month_dates(last_previous_month)
 
 
-def previous_comparable_period(
-    *, start_date: date, end_date: date, period_type: str, timezone: str
-) -> tuple[datetime, datetime]:
+def previous_comparable_period_dates(
+    *, start_date: date, end_date: date, period_type: str
+) -> tuple[date, date]:
     if period_type == "monthly":
-        previous_start, previous_end = previous_month_dates(start_date)
+        return previous_month_dates(start_date)
     else:
         span = end_date - start_date
         previous_end = start_date - timedelta(days=1)
         previous_start = previous_end - span
-    return _date_period_bounds(previous_start, previous_end, timezone)
+        return previous_start, previous_end
 
 
 def _entries_query_text(entries: Sequence[Entry], *, label: str) -> str:

@@ -265,11 +265,18 @@ def render_metrics_csv(payload: dict[str, Any]) -> str:
     writer.writeheader()
 
     features_by_entry = _feature_analyses_by_entry(payload.get("ai_analyses", []))
+    day_dates_by_id = {
+        str(day.get("id")): str(day.get("local_date"))
+        for day in payload.get("days", [])
+        if day.get("id") and day.get("local_date")
+    }
     for entry in payload.get("entries", []):
         entry_id = str(entry.get("id") or "")
         features = features_by_entry.get(entry_id, {})
         timestamp = entry.get("local_timestamp") or entry.get("created_at")
-        local_date_text = str(timestamp)[:10] if timestamp else ""
+        local_date_text = day_dates_by_id.get(str(entry.get("day_id") or ""))
+        if local_date_text is None:
+            local_date_text = str(timestamp)[:10] if timestamp else ""
         local_time_text = str(timestamp)[11:16] if timestamp and len(str(timestamp)) >= 16 else ""
         pleasant_moments = features.get("pleasant_moments") or []
         writer.writerow(

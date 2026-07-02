@@ -164,6 +164,13 @@ def test_day_query_parses_explicit_dates() -> None:
     assert _parse_day_query("колись", "Europe/Kyiv") is None
 
 
+def test_day_query_uses_journal_today_when_provided() -> None:
+    journal_today = date(2026, 7, 1)
+
+    assert _parse_day_query("сьогодні", "Europe/Kyiv", today=journal_today) == journal_today
+    assert _parse_day_query("вчора", "Europe/Kyiv", today=journal_today) == date(2026, 6, 30)
+
+
 def test_summary_detail_keyboard_scopes_callbacks_to_summary() -> None:
     summary_id = str(uuid4())
     keyboard = summary_detail_keyboard(summary_id=summary_id)

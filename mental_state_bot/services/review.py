@@ -453,9 +453,11 @@ def _stale_summary_notice(details: dict[str, Any]) -> str | None:
 def format_period_summary(summary: Summary) -> str:
     details = summary.details or {}
     title = "Тижневий підсумок" if summary.period_type == "weekly" else "Місячний підсумок"
+    start_label = details.get("journal_start_date") or _display_date(summary.period_start)
+    end_label = details.get("journal_end_date") or _display_date(summary.period_end)
     lines = [
         title,
-        f"{_display_date(summary.period_start)} - {_display_date(summary.period_end)}",
+        f"{start_label} - {end_label}",
         "",
         summary.short_text,
         "",
@@ -485,6 +487,7 @@ def format_period_summary(summary: Summary) -> str:
 async def format_period_timeline_view(session: AsyncSession, *, user: User, summary: Summary) -> str:
     start_date, end_date = _summary_local_date_range(summary, user.timezone)
     days = await repo.list_days_between(session, user_id=user.id, start_date=start_date, end_date=end_date)
+    days_by_id = _days_by_id(days)
     entries = await repo.list_entries_between(
         session,
         user_id=user.id,
@@ -498,11 +501,8 @@ async def format_period_timeline_view(session: AsyncSession, *, user: User, summ
         start=summary.period_start,
         end=summary.period_end,
     )
-    entry_counts = _entry_counts_by_local_date(entries, timezone=user.timezone)
-    summaries_by_date = {
-        summary_item.period_start.astimezone(zoneinfo(user.timezone)).date(): summary_item
-        for summary_item in daily_summaries
-    }
+    entry_counts = _entry_counts_by_journal_date(entries, days_by_id=days_by_id, timezone=user.timezone)
+    summaries_by_date = _summaries_by_journal_date(daily_summaries, days_by_id=days_by_id, timezone=user.timezone)
     day_ids_by_date = {day.local_date: day.id for day in days}
     lines = [
         _period_title(summary),
@@ -577,6 +577,8 @@ async def build_period_metrics_chart_png(
 
 async def format_period_days_view(session: AsyncSession, *, user: User, summary: Summary) -> str:
     start_date, end_date = _summary_local_date_range(summary, user.timezone)
+    days = await repo.list_days_between(session, user_id=user.id, start_date=start_date, end_date=end_date)
+    days_by_id = _days_by_id(days)
     daily_summaries = await repo.list_summaries_between(
         session,
         user_id=user.id,
@@ -590,7 +592,7 @@ async def format_period_days_view(session: AsyncSession, *, user: User, summary:
         start=summary.period_start,
         end=summary.period_end,
     )
-    entry_counts = _entry_counts_by_local_date(entries, timezone=user.timezone)
+    entry_counts = _entry_counts_by_journal_date(entries, days_by_id=days_by_id, timezone=user.timezone)
     lines = [
         f"Дні періоду: {_period_title(summary).lower()}",
         f"{start_date.isoformat()} - {end_date.isoformat()}",
@@ -598,10 +600,7 @@ async def format_period_days_view(session: AsyncSession, *, user: User, summary:
     ]
     if not daily_summaries and not entry_counts:
         return "\n".join([*lines, "За цей період немає даних."])
-    summaries_by_date = {
-        summary_item.period_start.astimezone(zoneinfo(user.timezone)).date(): summary_item
-        for summary_item in daily_summaries
-    }
+    summaries_by_date = _summaries_by_journal_date(daily_summaries, days_by_id=days_by_id, timezone=user.timezone)
     for current in _date_range(start_date, end_date):
         count = entry_counts.get(current, 0)
         daily = summaries_by_date.get(current)
@@ -1197,6 +1196,8 @@ def _metric_entries(entries: list[Entry]) -> list[Entry]:
 
 async def _period_metrics_report(session: AsyncSession, *, user: User, summary: Summary) -> dict[str, Any]:
     start_date, end_date = _summary_local_date_range(summary, user.timezone)
+    days = await repo.list_days_between(session, user_id=user.id, start_date=start_date, end_date=end_date)
+    days_by_id = _days_by_id(days)
     entries = _metric_entries(
         list(
             await repo.list_entries_between(
@@ -1236,7 +1237,7 @@ async def _period_metrics_report(session: AsyncSession, *, user: User, summary: 
                 continue
             state_counts[normalized_label] += 1
         quality_counts[_data_quality_label(result.get("data_quality"))] += 1
-        entry_date = _entry_local_date(entry, user.timezone)
+        entry_date = _entry_journal_date(entry, days_by_id=days_by_id, timezone=user.timezone)
         mood = _feature_score(result.get("mood"))
         energy = _feature_score(result.get("energy"))
         if entry_date is not None and mood is not None:
@@ -1246,7 +1247,7 @@ async def _period_metrics_report(session: AsyncSession, *, user: User, summary: 
         meaningful_pleasant.extend(_meaningful_pleasant_moments(result.get("pleasant_moments") or []))
 
     dates = list(_date_range(start_date, end_date))
-    entry_counts = _entry_counts_by_local_date(entries, timezone=user.timezone)
+    entry_counts = _entry_counts_by_journal_date(entries, days_by_id=days_by_id, timezone=user.timezone)
     return {
         "entry_count": len(entries),
         "active_days": len([count for count in entry_counts.values() if count]),
@@ -1262,11 +1263,28 @@ async def _period_metrics_report(session: AsyncSession, *, user: User, summary: 
 
 
 def _summary_local_date_range(summary: Summary, timezone: str) -> tuple[date, date]:
+    details = summary.details or {}
+    start_date = _parse_iso_date(details.get("journal_start_date"))
+    end_date = _parse_iso_date(details.get("journal_end_date"))
+    if start_date is not None and end_date is not None:
+        return start_date, end_date
+    journal_date = _parse_iso_date(details.get("journal_date"))
+    if journal_date is not None:
+        return journal_date, journal_date
     start = _timestamp_in_timezone(summary.period_start, zoneinfo(timezone))
     end = _timestamp_in_timezone(summary.period_end, zoneinfo(timezone))
     if start is None or end is None:
         return date.today(), date.today()
     return start.date(), end.date()
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _date_range(start: date, end: date):
@@ -1283,6 +1301,46 @@ def _entry_counts_by_local_date(entries, *, timezone: str) -> dict[date, int]:
         if entry_date is not None:
             counts[entry_date] += 1
     return counts
+
+
+def _days_by_id(days: list[Day] | tuple[Day, ...] | Any) -> dict[str, Day]:
+    return {str(day.id): day for day in days}
+
+
+def _entry_counts_by_journal_date(entries, *, days_by_id: dict[str, Day], timezone: str) -> dict[date, int]:
+    counts: dict[date, int] = defaultdict(int)
+    for entry in entries:
+        entry_date = _entry_journal_date(entry, days_by_id=days_by_id, timezone=timezone)
+        if entry_date is not None:
+            counts[entry_date] += 1
+    return counts
+
+
+def _entry_journal_date(entry: Entry, *, days_by_id: dict[str, Day], timezone: str) -> date | None:
+    if entry.day_id:
+        day = days_by_id.get(str(entry.day_id))
+        if day is not None:
+            return day.local_date
+    return _entry_local_date(entry, timezone)
+
+
+def _summaries_by_journal_date(
+    summaries: list[Summary] | tuple[Summary, ...] | Any,
+    *,
+    days_by_id: dict[str, Day],
+    timezone: str,
+) -> dict[date, Summary]:
+    result: dict[date, Summary] = {}
+    for summary in summaries:
+        summary_date = None
+        if summary.day_id:
+            day = days_by_id.get(str(summary.day_id))
+            if day is not None:
+                summary_date = day.local_date
+        if summary_date is None:
+            summary_date, _ = _summary_local_date_range(summary, timezone)
+        result[summary_date] = summary
+    return result
 
 
 def _entry_local_date(entry: Entry, timezone: str) -> date | None:
