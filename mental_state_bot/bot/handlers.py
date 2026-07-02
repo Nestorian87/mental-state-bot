@@ -56,6 +56,7 @@ from mental_state_bot.services.life_context import (
     current_life_context_candidate,
     format_life_context_items,
     format_life_context_question,
+    maybe_start_auto_life_context_review,
     start_life_context_review,
 )
 from mental_state_bot.services.memory import MemoryService
@@ -1625,6 +1626,7 @@ async def correction_start_callback_handler(
 @router.callback_query(F.data.startswith("voice:"))
 async def voice_transcription_callback_handler(
     callback: CallbackQuery,
+    bot: Bot,
     settings: Settings,
     sessionmaker: async_sessionmaker[AsyncSession],
     interaction_service: InteractionService,
@@ -1690,6 +1692,16 @@ async def voice_transcription_callback_handler(
         )
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
+        asyncio.create_task(
+            _maybe_offer_life_context_task(
+                bot=bot,
+                settings=settings,
+                sessionmaker=sessionmaker,
+                ai_service=interaction_service.ai,
+                user_id=user_id,
+                chat_id=callback.message.chat.id,
+            )
+        )
 
 
 @router.callback_query(F.data.startswith("manual:"))
@@ -2036,6 +2048,16 @@ async def entry_handler(
                 entry_id,
                 user_id,
                 replace_existing=replace_existing_embedding,
+            )
+        )
+        asyncio.create_task(
+            _maybe_offer_life_context_task(
+                bot=bot,
+                settings=settings,
+                sessionmaker=sessionmaker,
+                ai_service=interaction_service.ai,
+                user_id=user_id,
+                chat_id=message.chat.id,
             )
         )
 
@@ -2575,6 +2597,41 @@ async def _embed_entry_task(
             )
     except Exception:
         logger.exception("Background embedding task failed", extra={"entry_id": str(entry_id)})
+
+
+async def _maybe_offer_life_context_task(
+    *,
+    bot: Bot,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    ai_service: AIService,
+    user_id: UUID,
+    chat_id: int,
+) -> None:
+    try:
+        async with sessionmaker() as session, session.begin():
+            user = await session.get(User, user_id)
+            if user is None:
+                return
+            if settings.telegram_allowed_user_ids and user.telegram_user_id not in settings.telegram_allowed_user_ids:
+                return
+            user_settings = await repo.get_user_settings(session, user.id)
+            result = await maybe_start_auto_life_context_review(
+                session,
+                user=user,
+                user_settings=user_settings,
+                ai_service=ai_service,
+            )
+            if result is None:
+                return
+            lead_text, _review = result
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"{lead_text}\n\nМожемо швидко перевірити кілька питань. Якщо не зараз — просто відклади.",
+            reply_markup=life_context_offer_keyboard(),
+        )
+    except Exception:
+        logger.exception("Background life context offer task failed", extra={"user_id": str(user_id)})
 
 
 async def _reanalyze_features_task(

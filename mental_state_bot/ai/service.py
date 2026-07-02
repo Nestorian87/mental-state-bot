@@ -17,6 +17,7 @@ from mental_state_bot.ai.prompts import (
     DAILY_SUMMARY_PROMPT,
     EXTRACTION_PROMPT,
     LIFE_CONTEXT_PROMPT,
+    LIFE_CONTEXT_PRUNE_PROMPT,
     MICRO_SUMMARY_PROMPT,
     MONTHLY_SUMMARY_PROMPT,
     QUESTION_PROMPT,
@@ -29,6 +30,7 @@ from mental_state_bot.ai.schemas import (
     DailySummary,
     EntryFeatures,
     LifeContextExtraction,
+    LifeContextPruneResult,
     MicroSummary,
     ModelCallResult,
     PeriodSummary,
@@ -219,6 +221,32 @@ class AIService:
             schema_model=LifeContextExtraction,
             system=SYSTEM_STYLE,
             prompt=LIFE_CONTEXT_PROMPT,
+            payload=context,
+            fallback=fallback,
+        )
+
+    async def prune_life_context_items(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        context: dict[str, Any],
+    ) -> tuple[LifeContextPruneResult, UUID | None]:
+        route = Route(
+            model=self.settings.ai_live_model,
+            thinking=False,
+            temperature=0.05,
+        )
+        item_ids = [str(item.get("id")) for item in context.get("life_context_items") or [] if item.get("id")]
+        fallback = LifeContextPruneResult(keep_item_ids=item_ids, drop_item_ids=[])
+        return await self._json_task(
+            session,
+            user_id=user_id,
+            task_name="prune_life_context_items",
+            route=route,
+            schema_model=LifeContextPruneResult,
+            system=SYSTEM_STYLE,
+            prompt=LIFE_CONTEXT_PRUNE_PROMPT,
             payload=context,
             fallback=fallback,
         )

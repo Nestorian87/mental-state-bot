@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -11,13 +11,17 @@ from mental_state_bot.ai.service import AIService
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import User, UserSettings
 from mental_state_bot.services.preferences import (
+    LIFE_CONTEXT_LAST_AUTO_OFFER_AT_KEY,
     life_context_items,
+    pending_input,
     pending_life_context_review,
     settings_json_with_life_context_items,
     settings_json_with_pending_life_context_review,
 )
 
 MAX_REVIEW_CANDIDATES = 5
+AUTO_REVIEW_COOLDOWN = timedelta(hours=10)
+AUTO_REVIEW_MIN_TEXT_ENTRIES = 4
 
 
 async def start_life_context_review(
@@ -32,6 +36,13 @@ async def start_life_context_review(
     if not usable_entries:
         return "Поки немає достатньо текстових записів, з яких можна обережно витягти контекст.", None
 
+    user_settings = await prune_life_context_items_if_needed(
+        session,
+        user=user,
+        user_settings=user_settings,
+        ai_service=ai_service,
+        recent_entries=usable_entries[-30:],
+    )
     existing_items = life_context_items(user_settings)
     extraction, model_run_id = await ai_service.extract_life_context_candidates(
         session,
@@ -68,6 +79,99 @@ async def start_life_context_review(
         values={"settings_json": settings_json_with_pending_life_context_review(user_settings, review)},
     )
     return "Маю кілька припущень про живий контекст. Перевіримо по одному.", review
+
+
+async def prune_life_context_items_if_needed(
+    session: AsyncSession,
+    *,
+    user: User,
+    user_settings: UserSettings,
+    ai_service: AIService,
+    recent_entries: list[Any] | None = None,
+) -> UserSettings:
+    items = life_context_items(user_settings)
+    if not items:
+        return user_settings
+
+    structurally_valid = [
+        item
+        for item in items
+        if str(item.get("id") or "").strip()
+        and str(item.get("label") or "").strip()
+        and str(item.get("answer") or item.get("hypothesis") or "").strip()
+    ]
+    if len(structurally_valid) != len(items):
+        user_settings = await repo.update_user_settings(
+            session,
+            user_id=user.id,
+            values={"settings_json": settings_json_with_life_context_items(user_settings, structurally_valid)},
+        )
+        items = structurally_valid
+    if not items:
+        return user_settings
+
+    prune_result, _ = await ai_service.prune_life_context_items(
+        session,
+        user_id=user.id,
+        context={
+            "life_context_items": items,
+            "recent_entries": [
+                {
+                    "id": str(entry.id),
+                    "local_timestamp": entry.local_timestamp.isoformat() if entry.local_timestamp else None,
+                    "raw_text": entry.raw_text,
+                }
+                for entry in (recent_entries or [])[-20:]
+            ],
+        },
+    )
+    drop_ids = {str(item_id) for item_id in prune_result.drop_item_ids}
+    if not drop_ids:
+        return user_settings
+
+    kept_items = [item for item in items if str(item.get("id")) not in drop_ids]
+    if len(kept_items) == len(items):
+        return user_settings
+    return await repo.update_user_settings(
+        session,
+        user_id=user.id,
+        values={"settings_json": settings_json_with_life_context_items(user_settings, kept_items)},
+    )
+
+
+async def maybe_start_auto_life_context_review(
+    session: AsyncSession,
+    *,
+    user: User,
+    user_settings: UserSettings,
+    ai_service: AIService,
+    now: datetime | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    current_time = now or datetime.now(UTC)
+    if pending_life_context_review(user_settings) or pending_input(user_settings):
+        return None
+    if _last_auto_offer_too_recent(user_settings, current_time):
+        return None
+
+    entries = await repo.get_recent_entries(session, user_id=user.id, limit=20)
+    text_entries = [entry for entry in entries if (entry.raw_text or "").strip()]
+    if len(text_entries) < AUTO_REVIEW_MIN_TEXT_ENTRIES:
+        return None
+
+    user_settings = await repo.update_user_settings(
+        session,
+        user_id=user.id,
+        values={"settings_json": _settings_json_with_last_auto_offer(user_settings, current_time)},
+    )
+    lead_text, review = await start_life_context_review(
+        session,
+        user=user,
+        user_settings=user_settings,
+        ai_service=ai_service,
+    )
+    if not review:
+        return None
+    return lead_text, review
 
 
 async def answer_life_context_candidate(
@@ -268,3 +372,22 @@ def _category_label(category: str) -> str:
         "term": "назва/термін",
         "other": "контекст",
     }.get(category, "контекст")
+
+
+def _last_auto_offer_too_recent(settings: UserSettings, now: datetime) -> bool:
+    value = (getattr(settings, "settings_json", None) or {}).get(LIFE_CONTEXT_LAST_AUTO_OFFER_AT_KEY)
+    if not isinstance(value, str):
+        return False
+    try:
+        last = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    return now - last < AUTO_REVIEW_COOLDOWN
+
+
+def _settings_json_with_last_auto_offer(settings: UserSettings, now: datetime) -> dict[str, Any]:
+    current = dict(getattr(settings, "settings_json", None) or {})
+    current[LIFE_CONTEXT_LAST_AUTO_OFFER_AT_KEY] = now.astimezone(UTC).isoformat()
+    return current

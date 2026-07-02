@@ -13,6 +13,7 @@ PENDING_MANUAL_ENTRY_KEY = "pending_manual_entry"
 PENDING_CORRECTION_ENTRY_ID_KEY = "pending_correction_entry_id"
 LIFE_CONTEXT_ITEMS_KEY = "life_context_items"
 PENDING_LIFE_CONTEXT_REVIEW_KEY = "pending_life_context_review"
+LIFE_CONTEXT_LAST_AUTO_OFFER_AT_KEY = "life_context_last_auto_offer_at"
 PENDING_INPUT_KINDS = {
     "custom_style",
     "profile_context",

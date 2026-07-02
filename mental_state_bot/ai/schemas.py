@@ -95,6 +95,12 @@ class LifeContextExtraction(BaseModel):
     candidates: list[LifeContextCandidate] = Field(default_factory=list)
 
 
+class LifeContextPruneResult(BaseModel):
+    keep_item_ids: list[str] = Field(default_factory=list)
+    drop_item_ids: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class DailySummary(BaseModel):
     short_text: str
     story: str
