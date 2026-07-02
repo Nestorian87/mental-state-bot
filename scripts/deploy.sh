@@ -2,6 +2,9 @@
 set -eu
 
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
+DOCKER_CONFIG="${DOCKER_CONFIG:-$(pwd)/.docker}"
+mkdir -p "$DOCKER_CONFIG"
+export DOCKER_CONFIG
 
 if [ -f .env ]; then
   set -a
