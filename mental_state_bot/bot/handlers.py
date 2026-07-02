@@ -1208,6 +1208,7 @@ async def day_detail_callback_handler(
     if parsed is None:
         await callback.answer("Не можу відкрити цей день")
         return
+    await callback.answer()
     day_id, section = parsed
     chart = None
     moments: list[PhotoMoment] = []
@@ -1234,7 +1235,6 @@ async def day_detail_callback_handler(
                 reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
             else:
                 text, chart, moments = await _format_day_detail_section(session, user=user, day=day, section=section)
-    await callback.answer()
     await _answer_long_text(
         callback.message,
         text,
@@ -1318,6 +1318,7 @@ async def summary_detail_callback_handler(
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
+    await callback.answer()
     parts = (callback.data or "").split(":")
     section = parts[-1] if len(parts) >= 2 else "story"
     chart = None
@@ -1379,7 +1380,6 @@ async def summary_detail_callback_handler(
                 text = format_photo_moments_view(moments, timezone=user.timezone)
             else:
                 text = await format_latest_summary_section(session, user=user, section=section)
-    await callback.answer()
     await _answer_long_text(callback.message, text, reply_markup=reply_markup)
     if chart is not None:
         await callback.message.answer_photo(
@@ -1776,6 +1776,7 @@ async def period_callback_handler(
 ) -> None:
     if not await _allowed_callback(callback, settings):
         return
+    await callback.answer("Генерую підсумок")
     period = callback.data.split(":", maxsplit=1)[1]
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_callback_user(session, callback, settings)
@@ -1786,7 +1787,6 @@ async def period_callback_handler(
                 summary = await summary_service.generate_current_week_summary(session, user=user)
         text = format_period_summary(summary)
         summary_id = str(summary.id)
-    await callback.answer()
     await _answer_long_text(callback.message, text, reply_markup=period_detail_keyboard(summary_id=summary_id))
 
 
@@ -1802,6 +1802,7 @@ async def period_detail_callback_handler(
     if parsed is None:
         await callback.answer("Не можу відкрити цей період")
         return
+    await callback.answer()
     summary_id, section = parsed
     chart = None
     reply_markup = None
@@ -1825,7 +1826,6 @@ async def period_detail_callback_handler(
                 text = await format_period_days_view(session, user=user, summary=summary)
             else:
                 text = format_period_summary(summary)
-    await callback.answer()
     await _answer_long_text(callback.message, text, reply_markup=reply_markup)
     if chart is not None:
         await callback.message.answer_photo(
@@ -2167,10 +2167,10 @@ async def day_summary_callback_handler(
 async def export_callback_handler(callback: CallbackQuery, settings: Settings) -> None:
     if not await _allowed_callback(callback, settings):
         return
+    await callback.answer("Готую експорт")
     export_format, extension, prefix, caption = _archive_export_options(callback.data or "")
     output = Path("./data") / f"{prefix}-{callback.from_user.id}.{extension}"
     await export_user_archive(settings, callback.from_user.id, output, format=export_format)
-    await callback.answer("Експорт готовий")
     await callback.message.answer_document(FSInputFile(output), caption=caption)
 
 
