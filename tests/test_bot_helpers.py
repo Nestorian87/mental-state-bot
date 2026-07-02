@@ -384,10 +384,12 @@ def test_pending_voice_note_payload_roundtrip_keeps_original_transcript() -> Non
         voice_note,
         telegram_message_id=10,
         reply_to_message_id=None,
+        target_pending_kind="life_context_free_answer",
     )
     restored = _voice_note_from_pending(payload, text="В цілому ти почуваєшся добре.")
 
     assert payload["telegram_message_id"] == 10
+    assert payload["target_pending_kind"] == "life_context_free_answer"
     assert restored.text == "В цілому ти почуваєшся добре."
     assert restored.original_text == "В цілому я почуваюся добре."
     assert restored.transcription_run_id == run_id

@@ -1857,6 +1857,9 @@ async def entry_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         user_id = user.id
+        user_settings = await repo.get_user_settings(session, user.id)
+        pending_kind = pending_input(user_settings)
+        manual_pending = pending_manual_entry(user_settings)
         if message.voice:
             async with _typing(message, bot):
                 voice_note = await _transcribe_voice_note(
@@ -1883,15 +1886,22 @@ async def entry_handler(
                                     if message.reply_to_message
                                     else None
                                 ),
+                                target_pending_kind=_voice_target_pending_kind(pending_kind),
                             ),
                         )
                     },
+                )
+                target_hint = (
+                    "\n\nПісля підтвердження використаю це як відповідь на питання про живий контекст."
+                    if _voice_target_pending_kind(pending_kind) == "life_context_free_answer"
+                    else ""
                 )
                 replies = [
                     BotReply(
                         "Перевір транскрипцію голосового:\n"
                         f"{_voice_transcription_preview(text)}\n\n"
-                        "Якщо все правильно, підтвердь. Якщо ні — натисни «Виправити текст» або просто надішли правильний текст наступним повідомленням.",
+                        "Якщо все правильно, підтвердь. Якщо ні — натисни «Виправити текст» або просто надішли правильний текст наступним повідомленням."
+                        f"{target_hint}",
                         keyboard="voice_transcript",
                     )
                 ]
@@ -2213,27 +2223,12 @@ async def _handle_pending_input(
             snapshot_closed=True,
         )
     if pending_kind == "life_context_free_answer":
-        user_settings = await repo.update_user_settings(
-            session,
-            user_id=user.id,
-            values={"settings_json": settings_json_without_pending_input(user_settings)},
-        )
-        answer_text, next_review = await answer_life_context_candidate(
+        return await _handle_life_context_free_answer(
             session,
             user=user,
             user_settings=user_settings,
-            answer=text,
-            answer_kind="free",
+            text=text,
         )
-        replies = [BotReply(answer_text)]
-        if next_review:
-            replies.append(
-                BotReply(
-                    "Є ще одне припущення для перевірки.",
-                    keyboard="life_context_continue",
-                )
-            )
-        return InteractionResult(replies=replies, snapshot_closed=True)
     if pending_kind == "correction":
         target_entry_id = _uuid_or_none(pending_correction_entry_id(user_settings))
         await repo.update_user_settings(
@@ -2298,6 +2293,15 @@ async def _confirm_pending_voice_transcript(
             snapshot_closed=True,
         )
 
+    if pending.get("target_pending_kind") == "life_context_free_answer":
+        return await _handle_life_context_free_answer(
+            session,
+            user=user,
+            user_settings=user_settings,
+            text=text,
+            clear_pending_voice=True,
+        )
+
     result = await interaction_service.handle_text_entry(
         session,
         user=user,
@@ -2320,6 +2324,42 @@ async def _confirm_pending_voice_transcript(
         values={"settings_json": settings_json_without_pending_voice_transcript(user_settings)},
     )
     return result
+
+
+async def _handle_life_context_free_answer(
+    session: AsyncSession,
+    *,
+    user,
+    user_settings: UserSettings,
+    text: str,
+    clear_pending_voice: bool = False,
+) -> InteractionResult:
+    settings_json = (
+        settings_json_without_pending_voice_transcript(user_settings)
+        if clear_pending_voice
+        else settings_json_without_pending_input(user_settings)
+    )
+    user_settings = await repo.update_user_settings(
+        session,
+        user_id=user.id,
+        values={"settings_json": settings_json},
+    )
+    answer_text, next_review = await answer_life_context_candidate(
+        session,
+        user=user,
+        user_settings=user_settings,
+        answer=text,
+        answer_kind="free",
+    )
+    replies = [BotReply(answer_text)]
+    if next_review:
+        replies.append(
+            BotReply(
+                "Є ще одне припущення для перевірки.",
+                keyboard="life_context_continue",
+            )
+        )
+    return InteractionResult(replies=replies, snapshot_closed=True)
 
 
 async def _store_photo(
@@ -2465,8 +2505,9 @@ def _pending_voice_note_payload(
     *,
     telegram_message_id: int | None,
     reply_to_message_id: int | None,
+    target_pending_kind: str | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "text": voice_note.text,
         "original_text": voice_note.original_text or voice_note.text,
         "original_path": str(voice_note.original_path) if voice_note.original_path else None,
@@ -2484,6 +2525,13 @@ def _pending_voice_note_payload(
         "telegram_message_id": telegram_message_id,
         "reply_to_message_id": reply_to_message_id,
     }
+    if target_pending_kind:
+        payload["target_pending_kind"] = target_pending_kind
+    return payload
+
+
+def _voice_target_pending_kind(pending_kind: str | None) -> str | None:
+    return pending_kind if pending_kind in {"life_context_free_answer"} else None
 
 
 def _voice_note_from_pending(pending: dict[str, object], *, text: str) -> VoiceNoteTranscription:
