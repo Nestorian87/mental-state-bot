@@ -32,6 +32,7 @@ from mental_state_bot.services.preferences import (
     life_context_items,
     pending_post_entry_followup,
     settings_json_with_clarification_queue,
+    settings_json_with_pending_clarification,
     settings_json_with_pending_post_entry_followup,
     user_profile_context,
 )
@@ -46,6 +47,7 @@ from mental_state_bot.time_utils import local_now, utc_now
 class BotReply:
     text: str
     keyboard: str | None = None
+    keyboard_options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -93,7 +95,7 @@ class InteractionService:
                 reply_to_message_id=reply_to_message_id,
                 source="manual",
             )
-            queued_clarification = await self.queue_clarification_for_entry(
+            immediate_clarification = await self.queue_clarification_for_entry(
                 session,
                 user=user,
                 user_settings=user_settings,
@@ -102,6 +104,7 @@ class InteractionService:
                 text=text,
                 snapshot=None,
                 style_context=style_context,
+                delivery="immediate",
             )
             day_context = await _day_context(session, day=day)
             graph_context = await _graph_context_for_text(
@@ -141,7 +144,8 @@ class InteractionService:
                         user_settings=user_settings,
                         entry=entry,
                         micro_summary=micro_summary.text,
-                        allow_calibration=not queued_clarification,
+                        allow_calibration=immediate_clarification is None,
+                        immediate_followup=_clarification_bot_reply(immediate_clarification),
                     )
                 ],
                 entry_id=entry.id,
@@ -161,126 +165,17 @@ class InteractionService:
             source="snapshot_response",
         )
 
-        should_clarify, clarification_need = await self._clarification_need(
+        immediate_clarification = await self.queue_clarification_for_entry(
             session,
-            snapshot=open_snapshot,
-            text=text,
+            user=user,
+            user_settings=user_settings,
+            day=day,
             entry=entry,
+            text=text,
+            snapshot=open_snapshot,
+            style_context=style_context,
+            delivery="immediate",
         )
-        if should_clarify:
-            recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=3)
-            snapshot_conversation = await _snapshot_conversation_context(session, snapshot=open_snapshot)
-            day_context = await _day_context(session, day=day)
-            graph_context = await _graph_context_for_text(
-                session,
-                user_id=user.id,
-                text=text,
-                task_name="clarification_memory_graph",
-            )
-            semantic_memory = await _live_semantic_context(
-                self,
-                session=session,
-                user=user,
-                query_text=_live_query_text(
-                    text=text,
-                    day_context=day_context,
-                    snapshot_conversation=snapshot_conversation,
-                ),
-                task_name="clarification_semantic_context",
-                exclude_entry_ids={entry.id},
-            )
-            clarification, model_run_id = await self.ai.generate_clarification(
-                session,
-                user_id=user.id,
-                context={
-                    "current_answer": text,
-                    "recent_entries": [_entry_context(item) for item in recent_entries],
-                    "snapshot": _snapshot_context_hint(open_snapshot),
-                    "snapshot_conversation": _bounded_snapshot_conversation(snapshot_conversation),
-                    "latest_prompt": snapshot_conversation.get("latest_prompt"),
-                    "day_context": _bounded_day_context(day_context),
-                    "relevant_memory_graph": graph_context,
-                    "semantic_memory": semantic_memory,
-                    "style": style_context,
-                    "clarification_need": clarification_need,
-                },
-            )
-            queue = clarification_queue(user_settings)
-            normalized_question = " ".join(clarification.question.split())
-            already_queued = any(
-                item.get("entry_id") == str(entry.id)
-                and item.get("status") in {"queued", "active"}
-                for item in queue
-            )
-            recently_similar = _recent_similar_clarification_exists(
-                queue,
-                question=normalized_question,
-                reason=str(clarification_need.get("reason") or ""),
-            )
-            if not already_queued and not recently_similar and normalized_question:
-                queue.append(
-                    {
-                        "id": str(uuid.uuid4()),
-                        "entry_id": str(entry.id),
-                        "question": normalized_question[:600],
-                        "options": [" ".join(str(option).split())[:80] for option in clarification.options[:4] if str(option).strip()],
-                        "reason": clarification_need.get("reason"),
-                        "model_run_id": str(model_run_id) if model_run_id else None,
-                        "status": "queued",
-                        "created_at": utc_now().isoformat(),
-                    }
-                )
-                await repo.update_user_settings(
-                    session,
-                    user_id=user.id,
-                    values={"settings_json": settings_json_with_clarification_queue(user_settings, queue)},
-                )
-            await repo.close_snapshot(session, snapshot_id=open_snapshot.id, status="deferred_clarification")
-            snapshot_conversation = await _snapshot_conversation_context(session, snapshot=open_snapshot)
-            day_context = await _day_context(session, day=day)
-            semantic_memory = await _live_semantic_context(
-                self,
-                session=session,
-                user=user,
-                query_text=_live_query_text(
-                    text=text,
-                    day_context=day_context,
-                    snapshot_conversation=snapshot_conversation,
-                ),
-                task_name="micro_summary_semantic_context",
-                exclude_entry_ids={entry.id},
-            )
-            micro_summary, _ = await self.ai.generate_micro_summary(
-                session,
-                user_id=user.id,
-                context={
-                    "raw_text": text,
-                    "snapshot_conversation": _bounded_snapshot_conversation(snapshot_conversation),
-                    "latest_prompt": snapshot_conversation.get("latest_prompt"),
-                    "day_context": _bounded_day_context(day_context),
-                    "semantic_memory": semantic_memory,
-                    "source": "snapshot_response",
-                    "style": style_context,
-                },
-            )
-            await self._store_micro_summary(
-                session, user=user, entry=entry, micro_summary=micro_summary, semantic_memory=semantic_memory
-            )
-            return InteractionResult(
-                replies=[
-                    await post_entry_reply(
-                        session,
-                        user=user,
-                        user_settings=user_settings,
-                        entry=entry,
-                        micro_summary=micro_summary.text,
-                        allow_calibration=False,
-                    )
-                ],
-                entry_id=entry.id,
-                snapshot_closed=True,
-                should_embed_entry=True,
-            )
 
         snapshot_conversation = await _snapshot_conversation_context(session, snapshot=open_snapshot)
         day_context = await _day_context(session, day=day)
@@ -312,7 +207,10 @@ class InteractionService:
         await self._store_micro_summary(
             session, user=user, entry=entry, micro_summary=micro_summary, semantic_memory=semantic_memory
         )
-        await repo.close_snapshot(session, snapshot_id=open_snapshot.id)
+        if immediate_clarification is not None:
+            await repo.close_snapshot(session, snapshot_id=open_snapshot.id, status="clarification")
+        else:
+            await repo.close_snapshot(session, snapshot_id=open_snapshot.id)
         return InteractionResult(
             replies=[
                 await post_entry_reply(
@@ -321,6 +219,8 @@ class InteractionService:
                     user_settings=user_settings,
                     entry=entry,
                     micro_summary=micro_summary.text,
+                    allow_calibration=immediate_clarification is None,
+                    immediate_followup=_clarification_bot_reply(immediate_clarification),
                 )
             ],
             entry_id=entry.id,
@@ -339,7 +239,8 @@ class InteractionService:
         text: str,
         snapshot: Snapshot | None,
         style_context: dict[str, Any],
-    ) -> bool:
+        delivery: str = "queued",
+    ) -> dict[str, Any] | None:
         should_clarify, clarification_need = await self._clarification_need(
             session,
             snapshot=snapshot,
@@ -347,7 +248,7 @@ class InteractionService:
             entry=entry,
         )
         if not should_clarify:
-            return False
+            return None
         recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=3)
         snapshot_conversation = (
             await _snapshot_conversation_context(session, snapshot=snapshot) if snapshot is not None else None
@@ -396,28 +297,40 @@ class InteractionService:
         recently_similar = _recent_similar_clarification_exists(
             queue,
             question=question,
-            reason=str(clarification_need.get("reason") or ""),
         )
         if already_queued or recently_similar or not question:
-            return False
-        queue.append(
-            {
-                "id": str(uuid.uuid4()),
-                "entry_id": str(entry.id),
-                "question": question[:600],
-                "options": [" ".join(str(option).split())[:80] for option in clarification.options[:4] if str(option).strip()],
-                "reason": clarification_need.get("reason"),
-                "model_run_id": str(model_run_id) if model_run_id else None,
-                "status": "queued",
-                "created_at": utc_now().isoformat(),
+            return None
+        item = {
+            "id": str(uuid.uuid4()),
+            "entry_id": str(entry.id),
+            "question": question[:600],
+            "options": [" ".join(str(option).split())[:80] for option in clarification.options[:4] if str(option).strip()],
+            "reason": clarification_need.get("reason"),
+            "model_run_id": str(model_run_id) if model_run_id else None,
+            "status": "queued",
+            "created_at": utc_now().isoformat(),
+        }
+        if delivery == "immediate":
+            delivered_at = utc_now().isoformat()
+            item = {
+                **item,
+                "status": "active",
+                "delivered_at": delivered_at,
+                "delivery_source": "post_entry",
             }
-        )
-        await repo.update_user_settings(
+        queue.append(item)
+        updated = await repo.update_user_settings(
             session,
             user_id=user.id,
             values={"settings_json": settings_json_with_clarification_queue(user_settings, queue)},
         )
-        return True
+        if delivery == "immediate":
+            await repo.update_user_settings(
+                session,
+                user_id=user.id,
+                values={"settings_json": settings_json_with_pending_clarification(updated, item)},
+            )
+        return item
 
     async def record_button_action(
         self,
@@ -568,6 +481,35 @@ class InteractionService:
         await self._store_micro_summary(
             session, user=user, entry=target, micro_summary=micro_summary, semantic_memory=semantic_memory
         )
+        if clarification_context is not None:
+            current_settings = await repo.get_user_settings(session, user.id)
+            next_clarification = await self.queue_clarification_for_entry(
+                session,
+                user=user,
+                user_settings=current_settings,
+                day=day,
+                entry=target,
+                text=correction_text,
+                snapshot=snapshot,
+                style_context=_style_context(current_settings),
+                delivery="immediate",
+            )
+            return InteractionResult(
+                replies=[
+                    await post_entry_reply(
+                        session,
+                        user=user,
+                        user_settings=current_settings,
+                        entry=target,
+                        micro_summary=micro_summary.text,
+                        allow_calibration=next_clarification is None,
+                        immediate_followup=_clarification_bot_reply(next_clarification),
+                    )
+                ],
+                entry_id=target.id,
+                snapshot_closed=True,
+                should_embed_entry=True,
+            )
         return InteractionResult(
             replies=[
                 BotReply(f"Оновив трактування для {target_note}."),
@@ -725,7 +667,7 @@ class InteractionService:
         self,
         session: AsyncSession,
         *,
-        snapshot: Snapshot,
+        snapshot: Snapshot | None,
         text: str,
         entry: Entry,
     ) -> tuple[bool, dict[str, Any]]:
@@ -901,29 +843,21 @@ def _recent_similar_clarification_exists(
     queue: list[dict[str, Any]],
     *,
     question: str,
-    reason: str,
 ) -> bool:
     today = utc_now().date().isoformat()
     for item in queue:
         status = str(item.get("status") or "")
-        if status in {"queued", "active"} and (
-            _same_clarification_reason(item, reason) or _question_similarity(str(item.get("question") or ""), question) >= 0.78
-        ):
+        if status in {"queued", "active"} and _question_similarity(
+            str(item.get("question") or ""), question
+        ) >= 0.78:
             return True
         if (
             status in {"answered", "skipped"}
             and _item_touched_on_date(item, today)
-            and (
-                _same_clarification_reason(item, reason)
-                or _question_similarity(str(item.get("question") or ""), question) >= 0.78
-            )
+            and _question_similarity(str(item.get("question") or ""), question) >= 0.78
         ):
             return True
     return False
-
-
-def _same_clarification_reason(item: dict[str, Any], reason: str) -> bool:
-    return bool(reason) and str(item.get("reason") or "") == reason
 
 
 def _item_touched_on_date(item: dict[str, Any], date_text: str) -> bool:
@@ -968,6 +902,25 @@ async def metric_calibration_replies(session: AsyncSession, *, entry: Entry) -> 
     return []
 
 
+def _clarification_bot_reply(item: dict[str, Any] | None) -> BotReply | None:
+    if item is None:
+        return None
+    item_id = str(item.get("id") or "")
+    question = " ".join(str(item.get("question") or "").split())
+    if not item_id or not question:
+        return None
+    options = tuple(
+        " ".join(str(option).split())[:80]
+        for option in item.get("options") or []
+        if str(option).strip()
+    )
+    return BotReply(
+        question,
+        keyboard=f"clarification:{item_id}",
+        keyboard_options=options,
+    )
+
+
 async def post_entry_reply(
     session: AsyncSession,
     *,
@@ -976,15 +929,17 @@ async def post_entry_reply(
     entry: Entry,
     micro_summary: str,
     allow_calibration: bool = True,
+    immediate_followup: BotReply | None = None,
 ) -> BotReply:
-    """Present one completed interpretation and at most one immediate next step."""
+    """Present a completed entry and one active next step, if it is useful now."""
     parts = [micro_summary]
-    interpretation = await interpretation_summary_reply(session, entry=entry)
-    if interpretation is not None:
-        parts.append(interpretation.text)
-
-    next_step = None
-    if allow_calibration:
+    interpretation = None
+    next_step = immediate_followup
+    if next_step is None:
+        interpretation = await interpretation_summary_reply(session, entry=entry)
+        if interpretation is not None:
+            parts.append(interpretation.text)
+    if next_step is None and allow_calibration:
         calibration_replies = await metric_calibration_replies(session, entry=entry)
         next_step = calibration_replies[0] if calibration_replies else None
     if next_step is not None:
@@ -1008,6 +963,7 @@ async def post_entry_reply(
         return BotReply(
             "\n\n".join(part for part in parts if part.strip()),
             keyboard=_post_entry_followup_keyboard(next_step.keyboard, entry=entry),
+            keyboard_options=next_step.keyboard_options,
         )
 
     parts.append("Записав як є. На цьому все.")

@@ -15,6 +15,7 @@ from mental_state_bot.bot.handlers import (
     _format_settings_text,
     _frequency_preset_values,
     _help_text,
+    _inline_reply_keyboard,
     _is_previous_period_query,
     _is_sleep_marker_text,
     _manual_entry_confirmation_text,
@@ -240,6 +241,22 @@ def test_deferred_clarification_keyboard_exposes_ai_options() -> None:
     assert "clarification:option:item-id:0" in callbacks
     assert "clarification:option:item-id:1" in callbacks
     assert "clarification:skip:item-id" in callbacks
+
+
+def test_inline_clarification_keyboard_preserves_ai_options() -> None:
+    keyboard = _inline_reply_keyboard(
+        "clarification:item-id",
+        options=("Варіант один", "Варіант два"),
+    )
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert "clarification:option:item-id:0" in callbacks
+    assert "clarification:option:item-id:1" in callbacks
 
 
 def test_emotion_intensity_keyboard_keeps_selected_emotions_in_callback() -> None:

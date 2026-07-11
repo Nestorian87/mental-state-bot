@@ -50,7 +50,7 @@ Implemented:
 - manual emotion correction uses the controlled emotion list, can save a separate intensity for each selected emotion, and can mark emotions as mentioned rather than current;
 - entry analysis records whether the emotional moment is observed, explicitly without a current emotion, or genuinely unclear;
 - new analyses receive a compact context of recent evidenced emotions from the same journal day, only to assess a possible transition;
-- when AI judges a meaningful emotional transition unclear, it can enqueue one contextual follow-up instead of silently losing the point;
+- when AI judges a meaningful emotional transition unclear, it can ask one contextual follow-up while the moment is still current instead of silently losing the point;
 - contextual clarification questions can carry AI-generated answer buttons while retaining free text and voice as equivalent inputs;
 - an answer is replayed against the original entry together with the exact clarification context, so it updates the target analysis rather than becoming a separate diary record;
 - the emotion chart draws each selected emotion through observed moments, uses zero only for emotions absent in an observed moment, and leaves genuinely unknown moments as visible gaps.
@@ -123,44 +123,38 @@ Implemented for inspection:
 
 ## Priority 1: Clarification Queue
 
-Initial implementation completed:
+Current implementation:
 
-- uncertain snapshot answers can be placed into a deferred queue instead of receiving an immediate follow-up;
-- the snapshot is closed and the answer remains a normal diary entry;
-- queued questions can be offered during the active day when there is no open snapshot, pending answer, or quiet pause;
+- uncertainty about the entry that has just arrived is handled immediately in the same composed reply, rather than being delayed until the moment is stale;
+- the bot keeps at most one active clarification at a time; after an answer it may ask another only when AI finds a different, material uncertainty;
+- no fixed per-day clarification cap is used;
+- historical/reviewer questions stay in the visible queue and are opened deliberately from the menu, never pushed by a timer as if they described the current moment;
 - a deferred question can be answered by text or confirmed voice transcription, or skipped without creating an entry;
 - meaningful uncertainty is evaluated for both snapshot answers and deliberately saved free-form entries;
 - once the system has decided a clarification is useful, the question model only formulates it and cannot silently veto it a second time;
 - question options are AI-generated when natural, including for a grouped queue question, while text and voice remain equivalent answers;
-- after a reanalysis run, the bot may enqueue one useful clarification only for the current journal day, never for a broad historical archive;
+- reanalysis does not create an automatic conversational follow-up;
 - queued items retain their status and target entry in user settings for export/debugging.
 - the main menu has a visible clarification queue/review screen;
-- delivery avoids immediately repeating the same clarification reason when possible;
 - queue creation skips already-active or recently-resolved similar questions.
-- evening delivery can use a cheap AI queue review to choose the most useful clarification, group 2-4 similar queued items into one natural question, or quietly skip low-value/repetitive items;
-- grouped clarification answers/skips close every grouped queue item instead of leaving duplicate follow-ups behind.
-- one entry response now produces one composed message: reflection/interpretation plus at most one immediate next step; additional uncertainty stays queued instead of arriving as parallel messages;
-- an active metric/emotion follow-up is persisted in settings, so scheduled snapshots and queued clarifications wait for it, including across a bot restart/deploy;
-- scheduled snapshots and queued clarifications are serialized per user in the bot process, preventing both jobs from sending competing prompts at the same time;
+- one entry response now produces one composed message with at most one active next step; a contextual clarification takes priority over dry interpretation and numeric calibration;
+- numeric metric buttons are a fallback when contextual AI clarification finds no useful natural question;
+- an active clarification or metric/emotion follow-up is persisted in settings, so scheduled snapshots wait for it, including across a bot restart/deploy;
+- scheduled snapshots and active follow-ups are serialized per user in the bot process, preventing competing prompts at the same time;
 - correction/profile bookkeeping entries are excluded from the cadence activity clock, so answering a deferred clarification does not falsely reset the rhythm of new snapshots.
-
-Current problem:
-
-- this flow is implemented, but should be tuned from real usage if the selected questions still feel too generic, too frequent, or too delayed.
 
 Target behavior:
 
-- collect uncertain but important items into a queue;
-- ask at a natural pause; defer when another snapshot, answer, or quiet period is active;
-- group similar uncertainty into one question;
-- max 2-4 clarification questions per day;
+- ask contextual questions while the referenced moment is still current;
+- allow an adaptive chain of questions, but only one open question and only while each answer reveals a new important gap;
+- collect older, reviewer-created uncertainty into a queue for deliberate review rather than surprise delivery;
 - always allow "не хочу уточнювати" / "пропустити";
 - preserve uncertainty when skipped instead of guessing.
 
 Remaining refinement:
 
-- tune AI queue review prompts based on real examples where evening clarification still feels unhelpful;
-- consider adding a lightweight debug view explaining why a queued clarification was selected or skipped.
+- tune contextual question generation from real usage where questions still feel generic or repetitive;
+- consider a lightweight review view that explains why an older question remains in the queue.
 
 Examples:
 

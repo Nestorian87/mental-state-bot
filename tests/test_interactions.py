@@ -7,6 +7,7 @@ import mental_state_bot.services.interactions as interactions_module
 from mental_state_bot.db.models import Snapshot
 from mental_state_bot.services.interactions import (
     InteractionService,
+    _clarification_bot_reply,
     _day_context,
     _latest_content_entry,
     _missing_core_metrics,
@@ -138,7 +139,7 @@ def test_missing_core_metrics_detects_unclear_mood_and_energy() -> None:
     assert _missing_core_metrics(features) == ["mood", "energy"]
 
 
-def test_recent_similar_clarification_exists_blocks_active_duplicate() -> None:
+def test_recent_similar_clarification_exists_blocks_semantic_duplicate() -> None:
     queue = [
         {
             "id": "q1",
@@ -150,8 +151,7 @@ def test_recent_similar_clarification_exists_blocks_active_duplicate() -> None:
 
     assert _recent_similar_clarification_exists(
         queue,
-        question="А з силами зараз як?",
-        reason="missing_energy",
+        question="Як зараз із силами?",
     )
 
 
@@ -820,3 +820,37 @@ async def test_post_entry_reply_combines_interpretation_and_single_next_step(mon
     assert reply.keyboard == f"metric_score_with_correction:{entry.id}:energy"
     assert updates[0]["pending_post_entry_followup"]["entry_id"] == str(entry.id)
     assert updates[0]["pending_post_entry_followup"]["kind"] == "metric"
+
+
+async def test_post_entry_reply_prioritizes_contextual_clarification(monkeypatch) -> None:
+    user = SimpleNamespace(id=uuid4())
+    entry = SimpleNamespace(id=uuid4())
+
+    async def unexpected_interpretation(session, *, entry):
+        raise AssertionError("Immediate clarification should not be preceded by a dry interpretation")
+
+    async def unexpected_calibration(session, *, entry):
+        raise AssertionError("Numeric calibration should not displace contextual clarification")
+
+    monkeypatch.setattr(interactions_module, "interpretation_summary_reply", unexpected_interpretation)
+    monkeypatch.setattr(interactions_module, "metric_calibration_replies", unexpected_calibration)
+
+    followup = _clarification_bot_reply(
+        {
+            "id": "clarification-id",
+            "question": "Що зараз відбувається в цьому моменті?",
+            "options": ["Відпочиваю", "Застряг", "Щось інше"],
+        }
+    )
+    reply = await post_entry_reply(
+        object(),
+        user=user,
+        user_settings=SimpleNamespace(settings_json={}),
+        entry=entry,
+        micro_summary="Записав момент.",
+        immediate_followup=followup,
+    )
+
+    assert reply.text == "Записав момент.\n\nЩо зараз відбувається в цьому моменті?"
+    assert reply.keyboard == "clarification:clarification-id"
+    assert reply.keyboard_options == ("Відпочиваю", "Застряг", "Щось інше")

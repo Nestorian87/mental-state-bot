@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -811,7 +811,7 @@ async def correction_message_handler(
         replies = result.replies
         should_embed = result.should_embed_entry
     for reply in replies:
-        await message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
+        await message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options))
     if should_embed and entry_id and user_id:
         asyncio.create_task(
             _embed_entry_task(
@@ -1858,7 +1858,7 @@ async def metric_calibration_callback_handler(
             replies=replies,
         )
     for reply in replies:
-        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
+        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options))
 
 
 @router.callback_query(F.data.startswith("emotion:") | F.data.startswith("e:"))
@@ -1946,7 +1946,7 @@ async def emotion_calibration_callback_handler(
                     emotion_intensity_levels=dict(zip(emotions, intensity_levels, strict=True)),
                     time_scope=time_scope,
                 )
-        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
+        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options))
         return
     parsed_intensity = _parse_emotion_intensity_callback(callback.data or "")
     if parsed_intensity is not None:
@@ -1971,7 +1971,7 @@ async def emotion_calibration_callback_handler(
                     emotions=emotions,
                     intensity_level=intensity_level,
                 )
-        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
+        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options))
         return
     parsed = _parse_emotion_callback(callback.data or "")
     if parsed is None:
@@ -2591,7 +2591,7 @@ async def voice_transcription_callback_handler(
         )
         await callback.message.answer(
             reply.text,
-            reply_markup=_inline_reply_keyboard(reply.keyboard) or fallback_markup,
+            reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options) or fallback_markup,
         )
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
@@ -2661,7 +2661,7 @@ async def manual_entry_callback_handler(
 
     await callback.answer()
     for reply in replies:
-        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
+        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options))
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
 
@@ -3124,7 +3124,7 @@ async def entry_handler(
     for reply in replies:
         await message.answer(
             reply.text,
-            reply_markup=_inline_reply_keyboard(reply.keyboard),
+            reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options),
         )
     if should_embed and entry_id and user_id:
         asyncio.create_task(
@@ -3294,7 +3294,7 @@ async def deferred_clarification_option_callback_handler(
     await callback.answer("Записую")
     await _clear_inline_keyboard(callback)
     for reply in result.replies:
-        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard))
+        await callback.message.answer(reply.text, reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options))
 
 
 @router.callback_query(F.data.startswith("clarification_queue:"))
@@ -3534,7 +3534,7 @@ async def snapshot_callback_handler(
     for reply in replies:
         await callback.message.answer(
             reply.text,
-            reply_markup=_inline_reply_keyboard(reply.keyboard),
+            reply_markup=_inline_reply_keyboard(reply.keyboard, options=reply.keyboard_options),
         )
     if should_embed and entry_id and user_id:
         asyncio.create_task(_embed_entry_task(settings, sessionmaker, memory_service, entry_id, user_id))
@@ -4499,12 +4499,6 @@ async def _reanalyze_features_task(
         )
         return
 
-    queued_clarification = await _queue_current_day_reanalysis_clarification(
-        settings=settings,
-        ai_service=ai_service,
-        sessionmaker=sessionmaker,
-        telegram_user_id=telegram_user_id,
-    )
     await bot.send_message(
         chat_id,
         "Переаналіз AI завершено.\n"
@@ -4516,59 +4510,8 @@ async def _reanalyze_features_task(
         f"- графік енергії: {result.before.energy_points} -> {result.after.energy_points}\n"
         f"- спостережені емоційні моменти: {result.before.observed_emotion_points} -> {result.after.observed_emotion_points}\n"
         f"- оновлено трактувань: {result.changed}\n\n"
-        "Тепер метрики й графіки для цих записів будуть будуватися на новішому аналізі."
-        + (
-            "\n\nДля поточного журнального дня додав одне доречне уточнення; надішлю його, коли чат буде вільний."
-            if queued_clarification
-            else ""
-        ),
+        "Тепер метрики й графіки для цих записів будуть будуватися на новішому аналізі.",
     )
-
-
-async def _queue_current_day_reanalysis_clarification(
-    *,
-    settings: Settings,
-    ai_service: AIService,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    telegram_user_id: int,
-) -> bool:
-    try:
-        async with sessionmaker() as session, session.begin():
-            user = await repo.get_user_by_telegram_id(session, telegram_user_id)
-            if user is None:
-                return False
-            user_settings = await repo.get_user_settings(session, user.id)
-            target_date = await current_journal_date(session, user=user, user_settings=user_settings)
-            day = await repo.get_day_by_date(session, user_id=user.id, local_date_value=target_date)
-            if day is None:
-                return False
-            entries = [
-                entry
-                for entry in await repo.list_day_entries(session, day_id=day.id)
-                if entry.source not in {"correction", "profile_context_update"}
-            ]
-            service = InteractionService(settings, ai_service)
-            for entry in reversed(entries[-3:]):
-                if await service.queue_clarification_for_entry(
-                    session,
-                    user=user,
-                    user_settings=user_settings,
-                    day=day,
-                    entry=entry,
-                    text=entry.raw_text or "",
-                    snapshot=None,
-                    style_context={
-                        "tone": user_settings.tone,
-                        "humanity_level": user_settings.humanity_level,
-                        "custom_interaction_style": custom_interaction_style(user_settings),
-                        "user_profile_context": user_profile_context(user_settings),
-                        "life_context": life_context_items(user_settings)[-20:],
-                    },
-                ):
-                    return True
-    except Exception:
-        logger.exception("Could not queue clarification after feature reanalysis", extra={"telegram_user_id": telegram_user_id})
-    return False
 
 
 async def _rebuild_memory_task(
@@ -4820,7 +4763,7 @@ async def _set_pending_post_entry_followup_from_replies(
     )
 
 
-def _inline_reply_keyboard(kind: str | None):
+def _inline_reply_keyboard(kind: str | None, *, options: Sequence[str] = ()):
     if kind == "snapshot_control":
         return snapshot_clarification_keyboard()
     if kind == "correction":
@@ -4848,6 +4791,9 @@ def _inline_reply_keyboard(kind: str | None):
     if kind and kind.startswith("emotion_calibration:"):
         entry_id = kind.split(":", maxsplit=1)[1]
         return emotion_calibration_keyboard(entry_id=entry_id)
+    if kind and kind.startswith("clarification:"):
+        item_id = kind.split(":", maxsplit=1)[1]
+        return deferred_clarification_keyboard(item_id=item_id, options=options)
     if kind and kind.startswith("emotion_calibration_with_correction:"):
         entry_id = kind.split(":", maxsplit=1)[1]
         return emotion_calibration_keyboard(entry_id=entry_id, include_correction=True)
