@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: mental_state_bot
+      POSTGRES_USER: mental_state_bot
+      POSTGRES_PASSWORD: mental_state_bot
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mental_state_bot -d mental_state_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mental_state_bot:mental_state_bot@postgres:5432/mental_state_bot
+      DATABASE_SYNC_URL: postgresql+psycopg://mental_state_bot:mental_state_bot@postgres:5432/mental_state_bot
+      MEDIA_ROOT: /app/data/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - media_data:/app/data/media
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  media_data:

@@ -1,0 +1,463 @@
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+from types import SimpleNamespace
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+import mental_state_bot.services.summaries as summaries_module
+from mental_state_bot.ai.schemas import EveningReview, EveningReviewQuestion
+from mental_state_bot.services.review import format_period_summary
+from mental_state_bot.services.summaries import (
+    SummaryService,
+    _date_period_bounds,
+    _entries_query_text,
+    _queue_evening_review_questions,
+    _replace_context_entry_analyses,
+    _semantic_records_context,
+    auto_morning_boundary_end,
+    current_month_dates,
+    current_week_dates,
+    previous_month_dates,
+    previous_week_dates,
+    sleep_marker_target_date,
+)
+
+
+def test_current_week_dates_start_monday_end_sunday() -> None:
+    start, end = current_week_dates(date(2026, 6, 29))
+
+    assert start == date(2026, 6, 29)
+    assert end == date(2026, 7, 5)
+
+
+def test_previous_week_dates() -> None:
+    start, end = previous_week_dates(date(2026, 6, 29))
+
+    assert start == date(2026, 6, 22)
+    assert end == date(2026, 6, 28)
+
+
+def test_current_month_dates() -> None:
+    start, end = current_month_dates(date(2026, 2, 15))
+
+    assert start == date(2026, 2, 1)
+    assert end == date(2026, 2, 28)
+
+
+def test_previous_month_dates_cross_year() -> None:
+    start, end = previous_month_dates(date(2026, 1, 10))
+
+    assert start == date(2025, 12, 1)
+    assert end == date(2025, 12, 31)
+
+
+def test_auto_morning_boundary_end_uses_next_local_midnight() -> None:
+    ended_at = auto_morning_boundary_end(date(2026, 6, 28), "Europe/Kyiv")
+
+    assert ended_at == datetime(2026, 6, 28, 21, 0, tzinfo=UTC)
+
+
+def test_sleep_marker_before_active_start_targets_previous_day() -> None:
+    sleep_time = datetime(2026, 7, 1, 1, 31, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+    assert sleep_marker_target_date(sleep_time, active_start="09:00") == date(2026, 6, 30)
+
+
+def test_sleep_marker_after_active_start_targets_current_day() -> None:
+    sleep_time = datetime(2026, 7, 1, 23, 31, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+    assert sleep_marker_target_date(sleep_time, active_start="09:00") == date(2026, 7, 1)
+
+
+def test_period_bounds_follow_journal_active_start() -> None:
+    start, end = _date_period_bounds(
+        date(2026, 7, 1),
+        date(2026, 7, 7),
+        "Europe/Kyiv",
+        active_start="09:00",
+    )
+
+    assert start == datetime(2026, 7, 1, 9, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+    assert end == datetime(2026, 7, 8, 8, 59, 59, 999999, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+
+async def test_sleep_summary_after_midnight_closes_previous_journal_day(monkeypatch) -> None:
+    class FakeSummaryService(SummaryService):
+        async def generate_day_summary(self, session, *, user, day, close_day=False):
+            assert day.local_date == date(2026, 6, 30)
+            assert close_day is True
+            return SimpleNamespace(short_text="Закрив вчора.")
+
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
+    day = SimpleNamespace(id=uuid4(), local_date=date(2026, 6, 30))
+    sleep_time = datetime(2026, 7, 1, 1, 31, tzinfo=ZoneInfo("Europe/Kyiv"))
+    calls = {"day_dates": [], "entries": []}
+
+    async def get_user_settings(session, user_id):
+        assert user_id == user.id
+        return SimpleNamespace(active_start="09:00")
+
+    async def get_or_create_day(session, *, user_id, local_date_value, started_at):
+        assert user_id == user.id
+        calls["day_dates"].append(local_date_value)
+        return day
+
+    async def get_day_by_date(session, *, user_id, local_date_value):
+        assert user_id == user.id
+        assert local_date_value == date(2026, 6, 30)
+        return SimpleNamespace(id=day.id, local_date=date(2026, 6, 30), ended_at=None)
+
+    async def add_entry(session, **kwargs):
+        calls["entries"].append(kwargs)
+        return SimpleNamespace(id=uuid4())
+
+    monkeypatch.setattr(summaries_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(summaries_module.repo, "get_or_create_day", get_or_create_day)
+    monkeypatch.setattr(summaries_module.repo, "get_day_by_date", get_day_by_date)
+    monkeypatch.setattr(summaries_module.repo, "add_entry", add_entry)
+    monkeypatch.setattr(summaries_module, "local_now", lambda timezone: sleep_time)
+    monkeypatch.setattr(summaries_module, "utc_now", lambda: datetime(2026, 6, 30, 22, 31, tzinfo=UTC))
+
+    service = FakeSummaryService(
+        SimpleNamespace(embeddings_enabled=False, embedding_api_key=None),
+        ai_service=None,
+    )
+
+    summary = await service.close_today_with_summary(object(), user=user)
+
+    assert summary.short_text == "Закрив вчора."
+    assert calls["day_dates"] == [date(2026, 6, 30)]
+    assert calls["entries"][0]["day_id"] == day.id
+    assert calls["entries"][0]["local_timestamp"] == sleep_time
+    assert calls["entries"][0]["meta"]["sleep_marker_target_date"] == "2026-06-30"
+
+
+async def test_sleep_summary_stores_day_reflection_before_sleep_marker(monkeypatch) -> None:
+    class FakeSummaryService(SummaryService):
+        async def generate_day_summary(self, session, *, user, day, close_day=False):
+            return SimpleNamespace(short_text="Закрив із оцінкою.")
+
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
+    day = SimpleNamespace(id=uuid4(), local_date=date(2026, 7, 1))
+    sleep_time = datetime(2026, 7, 1, 23, 10, tzinfo=ZoneInfo("Europe/Kyiv"))
+    calls = {"entries": []}
+
+    async def get_user_settings(session, user_id):
+        return SimpleNamespace(active_start="09:00")
+
+    async def get_or_create_day(session, *, user_id, local_date_value, started_at):
+        return day
+
+    async def get_day_by_date(session, *, user_id, local_date_value):
+        return SimpleNamespace(id=day.id, local_date=day.local_date, ended_at=None)
+
+    async def add_entry(session, **kwargs):
+        calls["entries"].append(kwargs)
+        return SimpleNamespace(id=uuid4())
+
+    monkeypatch.setattr(summaries_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(summaries_module.repo, "get_or_create_day", get_or_create_day)
+    monkeypatch.setattr(summaries_module.repo, "get_day_by_date", get_day_by_date)
+    monkeypatch.setattr(summaries_module.repo, "add_entry", add_entry)
+    monkeypatch.setattr(summaries_module, "local_now", lambda timezone: sleep_time)
+
+    service = FakeSummaryService(
+        SimpleNamespace(embeddings_enabled=False, embedding_api_key=None),
+        ai_service=None,
+    )
+
+    await service.close_today_with_summary(
+        object(),
+        user=user,
+        day_reflection="  день був дивний, але важливий  ",
+        day_reflection_kind="free",
+    )
+
+    assert [entry["source"] for entry in calls["entries"]] == ["day_reflection", "sleep_marker"]
+    assert calls["entries"][0]["raw_text"] == "Оцінка дня: день був дивний, але важливий"
+    assert calls["entries"][0]["meta"]["day_reflection"] == "день був дивний, але важливий"
+    assert calls["entries"][0]["meta"]["day_reflection_kind"] == "free"
+
+
+async def test_yesterday_summary_auto_closes_uncertain_day(monkeypatch) -> None:
+    class FakeSummaryService(SummaryService):
+        async def generate_day_summary(self, session, *, user, day, close_day=False):
+            assert day.boundary_kind == "auto_morning"
+            assert day.data_quality == "day_boundary_uncertain"
+            assert close_day is False
+            return SimpleNamespace(short_text="Підсумок готовий.")
+
+    day = SimpleNamespace(
+        id=uuid4(),
+        local_date=date(2026, 6, 28),
+        ended_at=None,
+        boundary_kind="calendar",
+        data_quality=None,
+    )
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
+    close_calls = []
+
+    async def get_day_by_date(session, *, user_id, local_date_value):
+        assert user_id == user.id
+        assert local_date_value == date(2026, 6, 28)
+        return day
+
+    async def list_day_entries(session, *, day_id):
+        assert day_id == day.id
+        return [SimpleNamespace(id=uuid4(), raw_text="щось було")]
+
+    async def close_day(session, *, day_id, ended_at, boundary_kind, data_quality=None):
+        close_calls.append(
+            {
+                "day_id": day_id,
+                "ended_at": ended_at,
+                "boundary_kind": boundary_kind,
+                "data_quality": data_quality,
+            }
+        )
+
+    async def summary_exists(session, *, user_id, day_id, period_type):
+        return False
+
+    async def get_user_settings(session, user_id):
+        assert user_id == user.id
+        return SimpleNamespace(active_start="09:00")
+
+    async def current_journal_date(session, *, user, user_settings):
+        return date(2026, 6, 29)
+
+    monkeypatch.setattr(summaries_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(summaries_module, "current_journal_date", current_journal_date)
+    monkeypatch.setattr(summaries_module.repo, "get_day_by_date", get_day_by_date)
+    monkeypatch.setattr(summaries_module.repo, "list_day_entries", list_day_entries)
+    monkeypatch.setattr(summaries_module.repo, "close_day", close_day)
+    monkeypatch.setattr(summaries_module.repo, "summary_exists", summary_exists)
+
+    service = FakeSummaryService(
+        SimpleNamespace(embeddings_enabled=False, embedding_api_key=None),
+        ai_service=None,
+    )
+
+    summary = await service.generate_yesterday_summary_if_needed(object(), user=user)
+
+    assert summary.short_text == "Підсумок готовий."
+    assert close_calls == [
+        {
+            "day_id": day.id,
+            "ended_at": datetime(2026, 6, 28, 21, 0, tzinfo=UTC),
+            "boundary_kind": "auto_morning",
+            "data_quality": "day_boundary_uncertain",
+        }
+    ]
+    assert day.ended_at == datetime(2026, 6, 28, 21, 0, tzinfo=UTC)
+
+
+async def test_previous_week_summary_if_needed_returns_existing_undelivered_summary(monkeypatch) -> None:
+    user = SimpleNamespace(id=uuid4(), timezone="Europe/Kyiv")
+    existing = SimpleNamespace(id=uuid4(), delivered_at=None, short_text="Готовий тижневий підсумок.")
+
+    async def get_user_settings(session, user_id):
+        assert user_id == user.id
+        return SimpleNamespace(active_start="09:00")
+
+    async def current_journal_date(session, *, user, user_settings):
+        return date(2026, 7, 6)
+
+    async def get_period_summary(session, *, user_id, period_type, period_start, period_end):
+        assert user_id == user.id
+        assert period_type == "weekly"
+        assert period_start == datetime(2026, 6, 29, 6, 0, tzinfo=UTC)
+        assert period_end.astimezone(ZoneInfo("Europe/Kyiv")) == datetime(
+            2026, 7, 6, 8, 59, 59, 999999, tzinfo=ZoneInfo("Europe/Kyiv")
+        )
+        return existing
+
+    async def list_entries_between(session, **kwargs):
+        raise AssertionError("existing undelivered summary should be returned without scanning entries")
+
+    monkeypatch.setattr(summaries_module.repo, "get_user_settings", get_user_settings)
+    monkeypatch.setattr(summaries_module, "current_journal_date", current_journal_date)
+    monkeypatch.setattr(summaries_module.repo, "get_period_summary", get_period_summary)
+    monkeypatch.setattr(summaries_module.repo, "list_entries_between", list_entries_between)
+
+    service = SummaryService(
+        SimpleNamespace(embeddings_enabled=False, embedding_api_key=None),
+        ai_service=None,
+    )
+
+    summary = await service.generate_previous_week_summary_if_needed(object(), user=user)
+
+    assert summary is existing
+
+
+def test_entries_query_text_compacts_recent_entries() -> None:
+    entries = [
+        SimpleNamespace(
+            raw_text="лежу   і\nне можу почати",
+            source="manual",
+            local_timestamp=datetime(2026, 6, 29, 10, 30),
+            created_at=None,
+        )
+    ]
+
+    text = _entries_query_text(entries, label="daily summary 2026-06-29")
+
+    assert text.startswith("daily summary 2026-06-29")
+    assert "2026-06-29T10:30:00 [manual] лежу і не можу почати" in text
+
+
+def test_semantic_records_context_truncates_source_text() -> None:
+    records = [
+        SimpleNamespace(
+            target_type="entry",
+            target_id="abc",
+            created_at=datetime(2026, 6, 1, 12, 0),
+            source_hash="hash",
+            source_text="x" * 900,
+        )
+    ]
+
+    context = _semantic_records_context(records)
+
+    assert context[0]["target_id"] == "abc"
+    assert context[0]["created_at"] == "2026-06-01T12:00:00"
+    assert len(context[0]["source_text"]) == 700
+    assert context[0]["source_text"].endswith("…")
+
+
+def test_evening_review_patch_replaces_entry_analysis_in_summary_context() -> None:
+    entry_id = str(uuid4())
+    context = {
+        "entries": [
+            {
+                "id": entry_id,
+                "analyses": [
+                    {"task": "extract_entry_features", "result": {"emotions": []}},
+                    {"task": "other", "result": {"keep": True}},
+                ],
+            }
+        ]
+    }
+
+    _replace_context_entry_analyses(
+        context,
+        {entry_id: {"emotions": [{"label": "сум"}], "confidence": 0.9}},
+    )
+
+    analyses = context["entries"][0]["analyses"]
+    assert analyses == [
+        {"task": "other", "result": {"keep": True}},
+        {
+            "task": "extract_entry_features",
+            "result": {"emotions": [{"label": "сум"}], "confidence": 0.9},
+            "confidence": 0.9,
+        },
+    ]
+
+
+async def test_evening_reviewer_queues_only_evidence_backed_question(monkeypatch) -> None:
+    user = SimpleNamespace(id=uuid4())
+    entry = SimpleNamespace(id=uuid4())
+    settings = SimpleNamespace(settings_json={})
+    saved = []
+
+    async def update_user_settings(session, *, user_id, values):
+        assert user_id == user.id
+        saved.append(values["settings_json"])
+        return SimpleNamespace(settings_json=values["settings_json"])
+
+    monkeypatch.setattr(summaries_module.repo, "update_user_settings", update_user_settings)
+    review = EveningReview(
+        question_candidates=[
+            EveningReviewQuestion(
+                entry_id=str(entry.id),
+                question="Це відчуття трималося довго чи змінилося після розмови?",
+                reason="важлива зміна стану",
+                evidence="У записі описано різкий спад після розмови.",
+                options=["Трималося", "Змінилося"],
+                confidence=0.9,
+            ),
+            EveningReviewQuestion(
+                entry_id=str(uuid4()),
+                question="Це питання не має бути в черзі.",
+                evidence="Немає відповідного запису.",
+                confidence=0.95,
+            ),
+        ]
+    )
+
+    queued = await _queue_evening_review_questions(
+        object(),
+        user=user,
+        user_settings=settings,
+        entries=[entry],
+        review=review,
+        model_run_id=uuid4(),
+    )
+
+    assert queued == [str(entry.id)]
+    assert len(saved) == 1
+    item = saved[0]["clarification_queue"][0]
+    assert item["entry_id"] == str(entry.id)
+    assert item["source"] == "evening_reviewer"
+    assert item["options"] == ["Трималося", "Змінилося"]
+
+
+async def test_evening_reviewer_does_not_queue_unsupported_question(monkeypatch) -> None:
+    user = SimpleNamespace(id=uuid4())
+    entry = SimpleNamespace(id=uuid4())
+    settings = SimpleNamespace(settings_json={})
+
+    async def update_user_settings(*args, **kwargs):
+        raise AssertionError("unsupported question must not be persisted")
+
+    monkeypatch.setattr(summaries_module.repo, "update_user_settings", update_user_settings)
+    review = EveningReview(
+        question_candidates=[
+            EveningReviewQuestion(
+                entry_id=str(entry.id),
+                question="Що ти відчував?",
+                confidence=0.99,
+            )
+        ]
+    )
+
+    queued = await _queue_evening_review_questions(
+        object(),
+        user=user,
+        user_settings=settings,
+        entries=[entry],
+        review=review,
+        model_run_id=None,
+    )
+
+    assert queued == []
+
+
+def test_format_period_summary_weekly() -> None:
+    summary = SimpleNamespace(
+        period_type="weekly",
+        period_start=date(2026, 6, 22),
+        period_end=date(2026, 6, 28),
+        short_text="Тиждень був нерівний.",
+        details={
+            "period_story": "Були провали й кілька ясніших вечорів.",
+            "repeated_patterns": ["важкий старт після довгих пауз"],
+            "changes_vs_previous_period": ["більше записів"],
+            "activity_state_patterns": ["лежання + низька енергія"],
+            "what_helped": ["вихід надвір"],
+            "what_worsened": ["довгі прогалини"],
+            "notable_days": ["середа"],
+            "data_gaps": ["понеділок після обіду"],
+            "cautious_observations": ["даних ще небагато"],
+            "data_quality": "partial",
+        },
+    )
+
+    text = format_period_summary(summary)
+
+    assert "Тижневий підсумок" in text
+    assert "Тиждень був нерівний." in text
+    assert "- важкий старт після довгих пауз" in text
+    assert "Якість даних: частково" in text
