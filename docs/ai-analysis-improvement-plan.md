@@ -473,6 +473,9 @@ Implemented first practical retrieval layer:
 - the memory menu has `Пам’ять у питаннях`, a compact debug view of when retrieval actually changed a question, without dumping raw similar diary records.
 - the same evidence-bound `semantic_memory_insight` contract now applies to micro-summaries and daily/period summaries in their existing AI calls; an insight is stored only when every cited entry id belongs to the retrieved capsule set.
 - prompts explicitly distinguish similarity confidence from a claim about the current moment/day/period, so memory can shape a cautious observation without overwriting current evidence.
+- retrieved embedding capsules are enriched with up to three evidence-linked `situation` graph nodes for the same past entry; this connects semantic retrieval to durable graph hypotheses without an additional AI call;
+- situation nodes retain their own evidence count, recency, confidence and normal graph decay, while prompts treat them as context for why past moments resemble each other rather than proof about the present.
+- when an evidence-bound memory insight is stored for a snapshot question, its debug view can also show only the situation labels attached to the cited retrieved records.
 
 Still remaining:
 

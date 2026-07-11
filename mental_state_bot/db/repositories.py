@@ -1148,6 +1148,28 @@ async def list_memory_evidence_for_export(session: AsyncSession, *, user_id: uui
     return result.scalars().all()
 
 
+async def list_situation_nodes_for_entry_targets(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    entry_ids: Sequence[uuid.UUID],
+) -> Sequence[tuple[uuid.UUID, MemoryNode]]:
+    if not entry_ids:
+        return []
+    result = await session.execute(
+        select(MemoryEvidence.target_id, MemoryNode)
+        .join(MemoryNode, MemoryNode.id == MemoryEvidence.node_id)
+        .where(
+            MemoryEvidence.user_id == user_id,
+            MemoryEvidence.target_type == "entry",
+            MemoryEvidence.target_id.in_(entry_ids),
+            MemoryNode.kind == "situation",
+        )
+        .order_by(desc(MemoryEvidence.created_at))
+    )
+    return result.all()
+
+
 async def delete_memory_graph(session: AsyncSession, *, user_id: uuid.UUID) -> None:
     await session.execute(delete(MemoryEvidence).where(MemoryEvidence.user_id == user_id))
     await session.execute(delete(MemoryEdge).where(MemoryEdge.user_id == user_id))

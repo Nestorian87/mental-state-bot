@@ -5553,11 +5553,17 @@ def _format_semantic_memory_influences(snapshots, prompts, *, timezone: str) -> 
         prompted_at = snapshot.prompted_at.astimezone(zoneinfo(timezone)) if snapshot.prompted_at else None
         time_text = prompted_at.strftime("%d.%m %H:%M") if prompted_at else "час невідомий"
         evidence_count = len(insight.get("evidence_entry_ids") or [])
+        situations = [
+            " ".join(str(item).split())
+            for item in insight.get("situation_labels") or []
+            if str(item).strip()
+        ]
         question = " ".join(str(prompt_by_snapshot.get(str(snapshot.id)) or "").split())
         lines.extend(
             [
                 f"{time_text} — {hypothesis}",
                 f"Підстави: {evidence_count} схожих попередніх записів.",
+                *([f"Ситуації: {', '.join(situations[:3])}"] if situations else []),
                 f"Питання: {question or 'не збережено'}",
                 "",
             ]

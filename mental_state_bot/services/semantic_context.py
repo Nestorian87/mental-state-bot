@@ -26,12 +26,23 @@ def verified_semantic_memory_insight(insight: dict, records: list[dict]) -> dict
     if not hypothesis or not evidence_ids:
         return None
     confidence = insight.get("confidence")
-    return {
+    verified = {
         "used": True,
         "hypothesis": hypothesis[:500],
         "evidence_entry_ids": evidence_ids[:4],
         "confidence": float(confidence) if isinstance(confidence, int | float) else 0.0,
     }
+    situation_labels: list[str] = []
+    for record in records:
+        if str(record.get("target_id") or "") not in evidence_ids:
+            continue
+        for situation in record.get("situations") or []:
+            label = " ".join(str((situation or {}).get("label") or "").split())
+            if label and label not in situation_labels:
+                situation_labels.append(label[:160])
+    if situation_labels:
+        verified["situation_labels"] = situation_labels[:4]
+    return verified
 
 
 async def semantic_memory_context(
@@ -73,6 +84,11 @@ async def semantic_memory_context(
             for record in records
             if not (record.target_type == "entry" and str(record.target_id) in excluded)
         ]
+        situation_context = await _situation_context_for_records(
+            session,
+            user_id=user.id,
+            records=filtered,
+        )
         await repo.add_retrieval_log(
             session,
             user_id=user.id,
@@ -95,6 +111,7 @@ async def semantic_memory_context(
                 "target_id": str(record.target_id),
                 "created_at": record.created_at.isoformat() if record.created_at else None,
                 "source_text": _truncate(record.source_text, 700),
+                "situations": situation_context.get(str(record.target_id), []),
             }
             for record in filtered
         ]
@@ -111,3 +128,45 @@ def _truncate(text: str, limit: int) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
+
+
+async def _situation_context_for_records(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    records,
+) -> dict[str, list[dict]]:
+    entry_ids = [record.target_id for record in records if record.target_type == "entry"]
+    if not entry_ids:
+        return {}
+    try:
+        pairs = await repo.list_situation_nodes_for_entry_targets(
+            session,
+            user_id=user_id,
+            entry_ids=entry_ids,
+        )
+    except Exception as exc:
+        logger.warning("Situation context lookup failed", extra={"user_id": str(user_id), "error": str(exc)})
+        return {}
+    by_entry: dict[str, list[dict]] = {}
+    seen: set[tuple[str, str]] = set()
+    for entry_id, node in pairs:
+        key = (str(entry_id), str(node.id))
+        if key in seen:
+            continue
+        seen.add(key)
+        items = by_entry.setdefault(str(entry_id), [])
+        if len(items) >= 3:
+            continue
+        situation = dict((node.meta or {}).get("situation") or {})
+        items.append(
+            {
+                "label": " ".join(str(node.label or "").split())[:160],
+                "summary": " ".join(str(node.summary or "").split())[:360] or None,
+                "status": node.status,
+                "confidence": float(node.confidence or 0),
+                "weight": float(node.weight or 0),
+                "evidence_count": int(situation.get("evidence_count") or 0),
+            }
+        )
+    return by_entry
