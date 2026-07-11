@@ -294,11 +294,19 @@ class LifeContextRewriteResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class DailyTurningPoint(BaseModel):
+    entry_id: str
+    title: str
+    change: str
+    confidence: float = Field(default=0.5, ge=0, le=1)
+
+
 class DailySummary(BaseModel):
     short_text: str
     story: str
     actual_activities: list[str] = Field(default_factory=list)
     state_changes: list[str] = Field(default_factory=list)
+    turning_points: list[DailyTurningPoint] = Field(default_factory=list)
     hardest_interval: str | None = None
     best_or_stablest_interval: str | None = None
     pleasant_moments: list[str] = Field(default_factory=list)

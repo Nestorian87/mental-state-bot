@@ -61,6 +61,8 @@ from mental_state_bot.bot.keyboards import (
     settings_style_keyboard,
     sleep_reflection_keyboard,
     summary_detail_keyboard,
+    turning_point_detail_keyboard,
+    turning_points_keyboard,
     voice_transcription_keyboard,
     wake_time_keyboard,
 )
@@ -420,6 +422,7 @@ def test_summary_detail_keyboard_scopes_callbacks_to_summary() -> None:
     assert f"summary:{summary_id}:story" in callbacks
     assert f"summary:{summary_id}:timeline" in callbacks
     assert f"summary:{summary_id}:refresh" in callbacks
+    assert f"summary:{summary_id}:turning_points" in callbacks
     assert "summary:timeline" not in callbacks
 
 
@@ -437,6 +440,29 @@ def test_day_detail_keyboard_scopes_callbacks_to_day() -> None:
     assert f"dayview:{day_id}:gaps" in callbacks
     assert f"dayview:{day_id}:entries" in callbacks
     assert f"dayview:{day_id}:refresh" in callbacks
+    assert f"dayview:{day_id}:turning_points" in callbacks
+
+
+def test_turning_point_keyboards_keep_navigation_scoped_to_the_day() -> None:
+    day_id = str(uuid4())
+    list_keyboard = turning_points_keyboard(day_id=day_id, labels=["1. 14:20 — Помітна зміна"])
+    detail_keyboard = turning_point_detail_keyboard(day_id=day_id, index=0)
+    list_callbacks = {
+        button.callback_data
+        for row in list_keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+    detail_callbacks = {
+        button.callback_data
+        for row in detail_keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert f"turning:detail:{day_id}:0" in list_callbacks
+    assert f"turning:entry:{day_id}:0" in detail_callbacks
+    assert f"turning:list:{day_id}" in detail_callbacks
 
 
 def test_correction_keyboard_can_target_entry() -> None:

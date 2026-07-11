@@ -11,6 +11,7 @@ from PIL import Image
 from mental_state_bot.emotions import EMOTION_COLORS
 from mental_state_bot.services.review import (
     AffectSpectrumPoint,
+    DayTurningPoint,
     EmotionSignalPoint,
     PhotoMoment,
     _affect_spectrum_png,
@@ -36,6 +37,8 @@ from mental_state_bot.services.review import (
     _sparkline,
     _story_material_lines,
     _truncate,
+    format_day_turning_point,
+    format_day_turning_points,
     format_gap_report,
     format_photo_moments_view,
     format_similar_entries,
@@ -390,6 +393,40 @@ def test_affect_spectrum_png_generates_valid_png_with_a_gap() -> None:
 
     assert png.startswith(b"\x89PNG\r\n\x1a\n")
     assert len(png) > 1000
+
+
+def test_affect_spectrum_png_generates_valid_png_with_turning_markers() -> None:
+    png = _affect_spectrum_png(
+        [
+            AffectSpectrumPoint(tone=0.7, color=(22, 163, 74), confidence=0.8),
+            AffectSpectrumPoint(tone=0.25, color=(59, 130, 246), confidence=0.8),
+        ],
+        width=900,
+        height=500,
+        turning_point_indexes={1: 1},
+    )
+
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert len(png) > 1000
+
+
+def test_format_day_turning_point_anchors_the_summary_to_the_original_entry() -> None:
+    entry = SimpleNamespace(
+        local_timestamp=datetime(2026, 7, 11, 14, 20, tzinfo=ZoneInfo("Europe/Kyiv")),
+        created_at=None,
+        raw_text="Короткий запис про помітну зміну стану.",
+    )
+    point = DayTurningPoint(
+        entry=entry,
+        title="Помітна зміна",
+        change="Стан відчутно змінився.",
+        confidence=0.8,
+    )
+
+    assert "14:20" in format_day_turning_points([point], timezone="Europe/Kyiv")
+    detail = format_day_turning_point(point, timezone="Europe/Kyiv", index=1)
+    assert "Опорний запис" in detail
+    assert entry.raw_text in detail
 
 
 def test_emotion_timeline_png_normalizes_real_time_x_values() -> None:

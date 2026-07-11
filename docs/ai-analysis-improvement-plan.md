@@ -605,10 +605,14 @@ Current state:
   interpolates between observed points, making long or under-observed intervals visually
   quieter rather than presenting them as additional measurements; it does not replace the
   strict emotion lanes.
+- the existing heavy daily-summary call can return up to four evidence-bound turning points,
+  each anchored to a specific entry; no additional AI call is needed;
+- the spectrum marks only turning points that also have a graphable spectrum point, using
+  small numbers rather than prose on the image;
+- `Повороти дня` opens a Telegram list, a detail card, and then the original supporting entry.
 
 Remaining:
 
-- connect the spectrum to structured, evidence-bound turning points from daily summaries;
 - consider stacked/ribbon variants after enough reanalyzed data exists;
 - ensure PDF reports include the emotional story of each day, not only aggregate charts.
 

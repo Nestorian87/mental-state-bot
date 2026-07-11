@@ -543,6 +543,7 @@ def summary_detail_keyboard(*, summary_id: str | None = None) -> InlineKeyboardM
                 InlineKeyboardButton(text="Метрики", callback_data=f"{prefix}:metrics"),
                 InlineKeyboardButton(text="Фото дня", callback_data=f"{prefix}:photos"),
             ],
+            [InlineKeyboardButton(text="Повороти дня", callback_data=f"{prefix}:turning_points")],
             [InlineKeyboardButton(text="Сирі записи", callback_data=f"{prefix}:raw")],
             [InlineKeyboardButton(text="Оновити підсумок", callback_data=f"{prefix}:refresh")],
             [InlineKeyboardButton(text="Головне меню", callback_data="nav:home")],
@@ -566,9 +567,29 @@ def day_detail_keyboard(*, day_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Прогалини", callback_data=f"{prefix}:gaps"),
                 InlineKeyboardButton(text="Сирі записи", callback_data=f"{prefix}:raw"),
             ],
+            [InlineKeyboardButton(text="Повороти дня", callback_data=f"{prefix}:turning_points")],
             [InlineKeyboardButton(text="Керувати записами", callback_data=f"{prefix}:entries")],
             [InlineKeyboardButton(text="Оновити підсумок", callback_data=f"{prefix}:refresh")],
             [InlineKeyboardButton(text="Головне меню", callback_data="nav:home")],
+        ]
+    )
+
+
+def turning_points_keyboard(*, day_id: str, labels: Sequence[str]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=label[:64], callback_data=f"turning:detail:{day_id}:{index}")]
+        for index, label in enumerate(labels)
+    ]
+    rows.append([InlineKeyboardButton(text="До дня", callback_data=f"dayview:{day_id}:story")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def turning_point_detail_keyboard(*, day_id: str, index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Показати запис", callback_data=f"turning:entry:{day_id}:{index}")],
+            [InlineKeyboardButton(text="Усі повороти", callback_data=f"turning:list:{day_id}")],
+            [InlineKeyboardButton(text="До дня", callback_data=f"dayview:{day_id}:story")],
         ]
     )
 

@@ -65,6 +65,8 @@ from mental_state_bot.bot.keyboards import (
     snapshot_clarification_keyboard,
     summaries_menu_keyboard,
     summary_detail_keyboard,
+    turning_point_detail_keyboard,
+    turning_points_keyboard,
     voice_transcription_keyboard,
     wake_time_keyboard,
 )
@@ -173,6 +175,8 @@ from mental_state_bot.services.review import (
     format_affective_vocabulary_audit,
     format_cost_report,
     format_day_summary_section,
+    format_day_turning_point,
+    format_day_turning_points,
     format_day_view,
     format_gaps_for_day,
     format_gaps_view,
@@ -192,6 +196,7 @@ from mental_state_bot.services.review import (
     format_similar_entries,
     format_summary_section,
     format_today_view,
+    get_day_turning_points,
     get_photo_moments_for_day,
     get_today_photo_moments,
 )
@@ -219,7 +224,7 @@ MANUAL_ENTRY_ACTIONS = {"save", "ignore"}
 router = Router()
 
 SLEEP_MARKER_TEXT = "лягаю спати"
-_DAY_DETAIL_SECTIONS = {"timeline", "metrics", "photos", "raw", "gaps"}
+_DAY_DETAIL_SECTIONS = {"timeline", "metrics", "photos", "raw", "gaps", "turning_points"}
 
 
 @dataclass(frozen=True)
@@ -1703,6 +1708,13 @@ async def day_detail_callback_handler(
                     day_id=str(day.id),
                     entries=_entry_management_buttons(entries, timezone=user.timezone),
                 )
+            elif section == "turning_points":
+                turning_points = await get_day_turning_points(session, day=day)
+                text = format_day_turning_points(turning_points, timezone=user.timezone)
+                reply_markup = turning_points_keyboard(
+                    day_id=str(day.id),
+                    labels=_turning_point_labels(turning_points, timezone=user.timezone),
+                )
             elif section == "refresh":
                 async with _typing(callback.message):
                     summary = await summary_service.generate_day_summary(session, user=user, day=day)
@@ -2067,6 +2079,13 @@ async def summary_detail_callback_handler(
                         summary = await summary_service.generate_day_summary(session, user=user, day=day)
                     text = summary.short_text
                     reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
+                elif day is not None and day.user_id == user.id and section == "turning_points":
+                    turning_points = await get_day_turning_points(session, day=day)
+                    text = format_day_turning_points(turning_points, timezone=user.timezone)
+                    reply_markup = turning_points_keyboard(
+                        day_id=str(day.id),
+                        labels=_turning_point_labels(turning_points, timezone=user.timezone),
+                    )
                 elif day is not None and day.user_id == user.id and section in _DAY_DETAIL_SECTIONS:
                     text, chart, emotion_chart, spectrum_chart, moments = await _format_day_detail_section(
                         session,
@@ -2086,6 +2105,13 @@ async def summary_detail_callback_handler(
                         summary = await summary_service.generate_day_summary(session, user=user, day=day)
                     text = summary.short_text
                     reply_markup = summary_detail_keyboard(summary_id=str(summary.id))
+                elif day is not None and day.user_id == user.id and section == "turning_points":
+                    turning_points = await get_day_turning_points(session, day=day)
+                    text = format_day_turning_points(turning_points, timezone=user.timezone)
+                    reply_markup = turning_points_keyboard(
+                        day_id=str(day.id),
+                        labels=_turning_point_labels(turning_points, timezone=user.timezone),
+                    )
                 elif day is not None and day.user_id == user.id and section in _DAY_DETAIL_SECTIONS:
                     text, chart, emotion_chart, spectrum_chart, moments = await _format_day_detail_section(
                         session,
@@ -2126,6 +2152,63 @@ async def summary_detail_callback_handler(
         )
     if moments:
         await _send_photo_moments(callback.message, moments)
+
+
+@router.callback_query(F.data.startswith("turning:"))
+async def turning_points_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) not in {3, 4} or parts[1] not in {"list", "detail", "entry"}:
+        await callback.answer("Не впізнав поворот", show_alert=True)
+        return
+    action, day_id = parts[1], parts[2]
+    index = None
+    if action in {"detail", "entry"}:
+        try:
+            index = int(parts[3])
+        except (IndexError, ValueError):
+            await callback.answer("Не впізнав поворот", show_alert=True)
+            return
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        day = await repo.get_day(session, day_id=day_id)
+        if day is None or day.user_id != user.id:
+            text = "Не знайшов цей день в архіві."
+            reply_markup = None
+        else:
+            points = await get_day_turning_points(session, day=day)
+            if action == "list" or index is None:
+                text = format_day_turning_points(points, timezone=user.timezone)
+                reply_markup = turning_points_keyboard(
+                    day_id=str(day.id),
+                    labels=_turning_point_labels(points, timezone=user.timezone),
+                )
+            elif not 0 <= index < len(points):
+                text = "Цей поворот уже не доступний. Можливо, підсумок дня оновився."
+                reply_markup = turning_points_keyboard(
+                    day_id=str(day.id),
+                    labels=_turning_point_labels(points, timezone=user.timezone),
+                )
+            elif action == "detail":
+                text = format_day_turning_point(points[index], timezone=user.timezone, index=index + 1)
+                reply_markup = turning_point_detail_keyboard(day_id=str(day.id), index=index)
+            else:
+                entry = points[index].entry
+                text = "\n".join(
+                    [
+                        f"Запис · {_entry_time_label(entry, user.timezone)}",
+                        "",
+                        entry.raw_text or "[без тексту]",
+                    ]
+                )
+                reply_markup = turning_point_detail_keyboard(day_id=str(day.id), index=index)
+    await callback.answer()
+    await _answer_long_text(callback.message, text, reply_markup=reply_markup)
 
 
 @router.callback_query(F.data == "nav:home")
@@ -5149,6 +5232,20 @@ async def _format_day_detail_section(
     else:
         text = await format_day_summary_section(session, user=user, day=day, section=section)
     return text, chart, emotion_chart, spectrum_chart, moments
+
+
+def _turning_point_labels(points, *, timezone: str) -> list[str]:
+    return [
+        f"{index}. {_entry_time_label(point.entry, timezone)} — {point.title}"
+        for index, point in enumerate(points, start=1)
+    ]
+
+
+def _entry_time_label(entry: Entry, timezone: str) -> str:
+    timestamp = entry.local_timestamp or entry.created_at
+    if timestamp is None:
+        return "час неясний"
+    return timestamp.astimezone(zoneinfo(timezone)).strftime("%H:%M")
 
 
 async def _format_day_for_date(

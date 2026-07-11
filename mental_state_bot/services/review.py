@@ -65,6 +65,14 @@ class AffectSpectrumPoint:
     confidence: float
 
 
+@dataclass(frozen=True)
+class DayTurningPoint:
+    entry: Entry
+    title: str
+    change: str
+    confidence: float
+
+
 async def _current_journal_date(session: AsyncSession, *, user: User) -> date:
     user_settings = await repo.get_user_settings(session, user.id)
     return await current_journal_date(session, user=user, user_settings=user_settings)
@@ -433,12 +441,119 @@ async def build_affect_spectrum_png_for_day(session: AsyncSession, *, user: User
     points = [_affect_spectrum_point(extraction_by_entry.get(str(entry.id)) or {}) for entry in entries]
     if not any(point is not None for point in points):
         return None
+    graphable_entry_ids = {
+        str(entry.id)
+        for entry, point in zip(entries, points, strict=True)
+        if point is not None
+    }
+    turning_points = await get_day_turning_points(
+        session,
+        day=day,
+        graphable_entry_ids=graphable_entry_ids,
+    )
+    entry_index = {str(entry.id): index for index, entry in enumerate(entries)}
+    turning_point_indexes = {
+        entry_index[str(point.entry.id)]: index + 1
+        for index, point in enumerate(turning_points)
+        if str(point.entry.id) in entry_index and points[entry_index[str(point.entry.id)]] is not None
+    }
     return _affect_spectrum_png(
         points,
         labels=[_entry_time_text(entry, user.timezone) for entry in entries],
         x_values=_entry_chart_x_values(entries, user.timezone),
         title=f"Спектр стану дня: {day.local_date.isoformat()}",
+        turning_point_indexes=turning_point_indexes,
     )
+
+
+async def get_day_turning_points(
+    session: AsyncSession,
+    *,
+    day: Day,
+    graphable_entry_ids: set[str] | None = None,
+) -> list[DayTurningPoint]:
+    summary = await repo.get_day_summary(session, user_id=day.user_id, day_id=day.id, period_type="daily")
+    if summary is None or _stale_summary_notice(summary.details or {}):
+        return []
+    entries = list(await repo.list_day_entries(session, day_id=day.id))
+    by_id = {str(entry.id): entry for entry in entries}
+    if graphable_entry_ids is None:
+        analyses = await repo.list_analyses_for_targets(
+            session,
+            target_type="entry",
+            target_ids=[entry.id for entry in entries],
+        )
+        extraction_by_entry = _latest_feature_results_by_entry(analyses)
+        graphable_entry_ids = {
+            str(entry.id)
+            for entry in entries
+            if _affect_spectrum_point(extraction_by_entry.get(str(entry.id)) or {}) is not None
+        }
+    points: list[DayTurningPoint] = []
+    used_entry_ids: set[str] = set()
+    for raw in (summary.details or {}).get("turning_points") or []:
+        if not isinstance(raw, dict):
+            continue
+        entry_id = str(raw.get("entry_id") or "")
+        entry = by_id.get(entry_id)
+        title = " ".join(str(raw.get("title") or "").split())[:110]
+        change = " ".join(str(raw.get("change") or "").split())[:420]
+        confidence = _bounded_confidence(raw.get("confidence"))
+        if (
+            entry is None
+            or entry_id not in graphable_entry_ids
+            or entry_id in used_entry_ids
+            or not title
+            or not change
+            or confidence < 0.55
+        ):
+            continue
+        points.append(DayTurningPoint(entry=entry, title=title, change=change, confidence=confidence))
+        used_entry_ids.add(entry_id)
+        if len(points) == 4:
+            break
+    return points
+
+
+def format_day_turning_points(points: list[DayTurningPoint], *, timezone: str) -> str:
+    if not points:
+        return "Повороти дня\n\nПоки немає достатньо надійних поворотів, прив'язаних до конкретних записів."
+    lines = ["Повороти дня", ""]
+    for index, point in enumerate(points, start=1):
+        lines.extend(
+            [
+                f"{index}. {_entry_time_text(point.entry, timezone)} — {point.title}",
+                point.change,
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def format_day_turning_point(point: DayTurningPoint, *, timezone: str, index: int) -> str:
+    return "\n".join(
+        [
+            f"Поворот {index} · {_entry_time_text(point.entry, timezone)}",
+            "",
+            point.title,
+            point.change,
+            "",
+            "Опорний запис:",
+            _truncate_text(" ".join((point.entry.raw_text or "[без тексту]").split()), 900),
+        ]
+    )
+
+
+def _bounded_confidence(value: object) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    compact = " ".join(text.split())
+    return compact if len(compact) <= limit else compact[: limit - 1].rstrip() + "…"
 
 
 async def get_today_photo_moments(session: AsyncSession, *, user: User) -> list[PhotoMoment]:
@@ -1980,6 +2095,7 @@ def _affect_spectrum_png(
     labels: list[str] | None = None,
     x_values: list[float] | None = None,
     title: str = "Спектр стану дня",
+    turning_point_indexes: dict[int, int] | None = None,
 ) -> bytes:
     output_width, output_height = width, height
     render_scale = 2
@@ -2101,6 +2217,15 @@ def _affect_spectrum_png(
             outline=(38, 50, 65),
             width=4 * render_scale,
         )
+        marker_number = (turning_point_indexes or {}).get(_index)
+        if marker_number is not None:
+            _draw_spectrum_turning_marker(
+                draw,
+                x=x,
+                y=y,
+                number=marker_number,
+                scale=render_scale,
+            )
 
     return _image_png_bytes(image.resize((output_width, output_height), Image.Resampling.LANCZOS))
 
@@ -2141,6 +2266,34 @@ def _draw_spectrum_highlight(
         color = _mix_color(previous[3].color, current[3].color, (index + 0.5) / last_index)
         color = _mix_color(color, (255, 255, 255), 0.20 if muted else 0.34)
         draw.line((*start, *end), fill=color, width=width)
+
+
+def _draw_spectrum_turning_marker(
+    draw: ImageDraw.ImageDraw,
+    *,
+    x: int,
+    y: int,
+    number: int,
+    scale: int,
+) -> None:
+    radius = 18 * scale
+    marker_y = max(radius + 12 * scale, y - 46 * scale)
+    draw.line((x, marker_y + radius, x, y - 15 * scale), fill=(51, 65, 85), width=2 * scale)
+    draw.ellipse(
+        (x - radius, marker_y - radius, x + radius, marker_y + radius),
+        fill=(15, 23, 42),
+        outline=(255, 255, 255),
+        width=3 * scale,
+    )
+    font = _chart_font(20 * scale, bold=True)
+    text = str(number)
+    box = draw.textbbox((0, 0), text, font=font)
+    draw.text(
+        (x - (box[2] - box[0]) // 2, marker_y - (box[3] - box[1]) // 2 - box[1]),
+        text,
+        fill=(255, 255, 255),
+        font=font,
+    )
 
 
 def _spectrum_curve_segments(
