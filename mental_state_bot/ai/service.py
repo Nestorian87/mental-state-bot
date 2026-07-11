@@ -147,9 +147,8 @@ class AIService:
             temperature=self.settings.ai_temperature,
         )
         fallback = ClarificationResult(
-            question="Уточню одне і закрию: що саме тут важливо зафіксувати?",
-            expected_gain="free_text_specificity",
-            should_clarify=True,
+            expected_gain="model_unavailable_no_safe_followup",
+            should_clarify=False,
         )
         return await self._json_task(
             session,

@@ -45,9 +45,10 @@ class QuietSuggestion(BaseModel):
 
 
 class ClarificationResult(BaseModel):
-    question: str
+    question: str = ""
     options: list[str] = Field(default_factory=list, max_length=4)
     expected_gain: str | None = None
+    focus: str | None = None
     should_clarify: bool = True
 
 

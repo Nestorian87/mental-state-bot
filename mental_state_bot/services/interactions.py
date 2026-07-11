@@ -249,6 +249,8 @@ class InteractionService:
         )
         if not should_clarify:
             return None
+        queue = clarification_queue(user_settings)
+        clarification_history = _clarification_history_for_entry(queue, entry_id=entry.id)
         recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=3)
         snapshot_conversation = (
             await _snapshot_conversation_context(session, snapshot=snapshot) if snapshot is not None else None
@@ -286,10 +288,12 @@ class InteractionService:
                 "semantic_memory": semantic_memory,
                 "style": style_context,
                 "clarification_need": clarification_need,
+                "clarification_history": clarification_history,
             },
         )
+        if not clarification.should_clarify:
+            return None
         question = " ".join(clarification.question.split())
-        queue = clarification_queue(user_settings)
         already_queued = any(
             item.get("entry_id") == str(entry.id) and item.get("status") in {"queued", "active"}
             for item in queue
@@ -306,6 +310,8 @@ class InteractionService:
             "question": question[:600],
             "options": [" ".join(str(option).split())[:80] for option in clarification.options[:4] if str(option).strip()],
             "reason": clarification_need.get("reason"),
+            "focus": " ".join(str(clarification.focus or "").split())[:160] or None,
+            "expected_gain": " ".join(str(clarification.expected_gain or "").split())[:320] or None,
             "model_run_id": str(model_run_id) if model_run_id else None,
             "status": "queued",
             "created_at": utc_now().isoformat(),
@@ -448,6 +454,12 @@ class InteractionService:
                 model=self.settings.ai_live_model,
                 result={
                     "correction_text": correction_text,
+                    "kind": "clarification_answer" if clarification_context is not None else "correction",
+                    "question": (
+                        " ".join(str(clarification_context.get("question") or "").split())
+                        if clarification_context is not None
+                        else None
+                    ),
                     "telegram_message_id": telegram_message_id,
                     "reply_to_message_id": reply_to_message_id,
                     "corrected_at": local_now(user.timezone).isoformat(),
@@ -463,6 +475,11 @@ class InteractionService:
                     day_id=target.day_id,
                     reason="entry_corrected",
                 )
+        latest_settings = await repo.get_user_settings(session, user.id)
+        clarification_history = _clarification_history_for_entry(
+            clarification_queue(latest_settings),
+            entry_id=target.id,
+        )
         micro_summary, _ = await self.ai.generate_micro_summary(
             session,
             user_id=user.id,
@@ -471,6 +488,16 @@ class InteractionService:
                 "source": "correction",
                 "correction_text": correction_text,
                 "original_entry": _entry_context(target) if target else None,
+                "clarification_history": clarification_history,
+                "correction_history": [
+                    {
+                        "text": item["answer"],
+                        "question": item.get("question"),
+                        "kind": "clarification_answer",
+                    }
+                    for item in clarification_history
+                    if item.get("answer")
+                ],
                 "snapshot_conversation": _bounded_snapshot_conversation(snapshot_conversation),
                 "latest_prompt": snapshot_conversation.get("latest_prompt") if snapshot_conversation else None,
                 "day_context": _bounded_day_context(day_context),
@@ -482,16 +509,15 @@ class InteractionService:
             session, user=user, entry=target, micro_summary=micro_summary, semantic_memory=semantic_memory
         )
         if clarification_context is not None:
-            current_settings = await repo.get_user_settings(session, user.id)
             next_clarification = await self.queue_clarification_for_entry(
                 session,
                 user=user,
-                user_settings=current_settings,
+                user_settings=latest_settings,
                 day=day,
                 entry=target,
                 text=correction_text,
                 snapshot=snapshot,
-                style_context=_style_context(current_settings),
+                style_context=_style_context(latest_settings),
                 delivery="immediate",
             )
             return InteractionResult(
@@ -499,7 +525,7 @@ class InteractionService:
                     await post_entry_reply(
                         session,
                         user=user,
-                        user_settings=current_settings,
+                        user_settings=latest_settings,
                         entry=target,
                         micro_summary=micro_summary.text,
                         allow_calibration=next_clarification is None,
@@ -858,6 +884,31 @@ def _recent_similar_clarification_exists(
         ):
             return True
     return False
+
+
+def _clarification_history_for_entry(queue: list[dict[str, Any]], *, entry_id: uuid.UUID) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for item in queue:
+        if str(item.get("entry_id") or "") != str(entry_id):
+            continue
+        status = str(item.get("status") or "queued")
+        if status not in {"answered", "skipped", "active"}:
+            continue
+        question = " ".join(str(item.get("question") or "").split())
+        answer = " ".join(str(item.get("answer") or "").split())
+        history.append(
+            {
+                "question": question[:600] or None,
+                "answer": answer[:900] or None,
+                "answer_source": item.get("answer_source"),
+                "status": status,
+                "focus": " ".join(str(item.get("focus") or "").split())[:160] or None,
+                "expected_gain": " ".join(str(item.get("expected_gain") or "").split())[:320] or None,
+                "reason": item.get("reason"),
+                "answered_at": item.get("answered_at"),
+            }
+        )
+    return history[-12:]
 
 
 def _item_touched_on_date(item: dict[str, Any], date_text: str) -> bool:

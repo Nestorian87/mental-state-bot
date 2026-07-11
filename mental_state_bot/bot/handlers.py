@@ -3090,7 +3090,13 @@ async def entry_handler(
             queue = clarification_queue(user_settings)
             related_ids = _clarification_related_ids(pending_deferred)
             next_queue = [
-                {**item, "status": "answered", "answered_at": utc_now().isoformat()}
+                {
+                    **item,
+                    "status": "answered",
+                    "answered_at": utc_now().isoformat(),
+                    "answer": text,
+                    "answer_source": "text",
+                }
                 if str(item.get("id")) in related_ids
                 else item
                 for item in queue
@@ -3923,7 +3929,13 @@ async def _confirm_pending_voice_transcript(
         queue = clarification_queue(user_settings)
         related_ids = _clarification_related_ids(deferred)
         next_queue = [
-            {**item, "status": "answered", "answered_at": utc_now().isoformat()}
+            {
+                **item,
+                "status": "answered",
+                "answered_at": utc_now().isoformat(),
+                "answer": text,
+                "answer_source": "voice",
+            }
             if str(item.get("id")) in related_ids
             else item
             for item in queue

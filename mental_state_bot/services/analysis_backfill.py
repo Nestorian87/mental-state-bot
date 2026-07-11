@@ -269,10 +269,15 @@ async def analyze_entry_features(
         target_ids=[entry.id],
     )
     manual_metric_overrides = _manual_metric_overrides(existing_analyses)
+    correction_history = _correction_history(existing_analyses, extra_context=extra_context)
+    context = {
+        **(extra_context or {}),
+        "correction_history": correction_history,
+    }
     features, model_run_id = await ai_service.extract_entry_features(
         session,
         user_id=user_id,
-        context=entry_feature_context(entry, extra_context=extra_context),
+        context=entry_feature_context(entry, extra_context=context),
     )
     features = postprocess_entry_features(features, entry.raw_text or "")
     _restore_manual_metric_overrides(features, manual_metric_overrides)
@@ -314,6 +319,36 @@ def _manual_metric_overrides(analyses) -> dict[str, dict[str, Any]]:
                 f"should_graph_{metric}": True,
             }
     return overrides
+
+
+def _correction_history(analyses, *, extra_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for analysis in analyses:
+        if analysis.task_name != "apply_correction" or not isinstance(analysis.result, dict):
+            continue
+        text = " ".join(str(analysis.result.get("correction_text") or "").split())
+        if not text:
+            continue
+        history.append(
+            {
+                "text": text[:900],
+                "kind": str(analysis.result.get("kind") or "correction"),
+                "question": " ".join(str(analysis.result.get("question") or "").split())[:600] or None,
+                "recorded_at": analysis.result.get("corrected_at"),
+            }
+        )
+    current_text = " ".join(str((extra_context or {}).get("correction_text") or "").split())
+    if current_text and (not history or history[-1].get("text") != current_text):
+        clarification = (extra_context or {}).get("clarification_context") or {}
+        history.append(
+            {
+                "text": current_text[:900],
+                "kind": "clarification_answer" if clarification else "correction",
+                "question": " ".join(str(clarification.get("question") or "").split())[:600] or None,
+                "recorded_at": None,
+            }
+        )
+    return history[-16:]
 
 
 def _restore_manual_metric_overrides(features: EntryFeatures, overrides: dict[str, dict[str, Any]]) -> None:

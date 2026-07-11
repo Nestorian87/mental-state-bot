@@ -4,10 +4,12 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import mental_state_bot.services.interactions as interactions_module
+from mental_state_bot.ai.schemas import ClarificationResult
 from mental_state_bot.db.models import Snapshot
 from mental_state_bot.services.interactions import (
     InteractionService,
     _clarification_bot_reply,
+    _clarification_history_for_entry,
     _day_context,
     _latest_content_entry,
     _missing_core_metrics,
@@ -153,6 +155,93 @@ def test_recent_similar_clarification_exists_blocks_semantic_duplicate() -> None
         queue,
         question="Як зараз із силами?",
     )
+
+
+def test_clarification_history_keeps_questions_answers_and_distinct_focuses() -> None:
+    entry_id = uuid4()
+    history = _clarification_history_for_entry(
+        [
+            {
+                "entry_id": str(entry_id),
+                "question": "Що саме змінилося?",
+                "answer": "Стало важче.",
+                "answer_source": "text",
+                "focus": "зміна стану",
+                "expected_gain": "напрямок зміни",
+                "status": "answered",
+            },
+            {
+                "entry_id": str(entry_id),
+                "question": "Що було причиною?",
+                "status": "active",
+                "focus": "причина",
+            },
+            {
+                "entry_id": str(uuid4()),
+                "question": "Не цей запис",
+                "status": "answered",
+            },
+        ],
+        entry_id=entry_id,
+    )
+
+    assert [item["focus"] for item in history] == ["зміна стану", "причина"]
+    assert history[0]["answer"] == "Стало важче."
+    assert history[1]["status"] == "active"
+
+
+async def test_clarification_chain_stops_when_ai_sees_no_new_information_gain(monkeypatch) -> None:
+    entry_id = uuid4()
+    service = InteractionService(SimpleNamespace(), SimpleNamespace())
+
+    async def clarification_need(*args, **kwargs):
+        return True, {"reason": "missing_energy"}
+
+    async def recent_entries(*args, **kwargs):
+        return []
+
+    async def no_memory(*args, **kwargs):
+        return []
+
+    async def empty_day_context(*args, **kwargs):
+        return {"entries": []}
+
+    class FakeAI:
+        async def generate_clarification(self, session, *, user_id, context):
+            assert context["clarification_history"][0]["answer"] == "Вже відповів."
+            return ClarificationResult(should_clarify=False, expected_gain="already_resolved"), None
+
+    service.ai = FakeAI()
+    monkeypatch.setattr(service, "_clarification_need", clarification_need)
+    monkeypatch.setattr(interactions_module.repo, "get_recent_entries", recent_entries)
+    monkeypatch.setattr(interactions_module, "_day_context", empty_day_context)
+    monkeypatch.setattr(interactions_module, "_graph_context_for_text", no_memory)
+    monkeypatch.setattr(interactions_module, "_live_semantic_context", no_memory)
+
+    result = await service.queue_clarification_for_entry(
+        object(),
+        user=SimpleNamespace(id=uuid4()),
+        user_settings=SimpleNamespace(
+            settings_json={
+                "clarification_queue": [
+                    {
+                        "entry_id": str(entry_id),
+                        "question": "Що з цим моментом?",
+                        "answer": "Вже відповів.",
+                        "status": "answered",
+                    }
+                ]
+            }
+        ),
+        day=SimpleNamespace(id=uuid4()),
+        entry=SimpleNamespace(id=entry_id),
+        text="Коротка відповідь.",
+        snapshot=None,
+        style_context={},
+        delivery="immediate",
+    )
+
+    assert result is None
 
 
 async def test_clarification_need_triggers_for_meaningful_missing_core_metric(monkeypatch) -> None:

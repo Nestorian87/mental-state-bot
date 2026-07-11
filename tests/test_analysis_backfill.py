@@ -12,6 +12,7 @@ from mental_state_bot.ai.schemas import (
     FeatureValue,
 )
 from mental_state_bot.services.analysis_backfill import (
+    _correction_history,
     _manual_metric_overrides,
     _restore_manual_metric_overrides,
     backfill_entry_features,
@@ -44,6 +45,33 @@ def test_entry_feature_context_includes_raw_time_metadata_and_extra_context() ->
         "backfill": False,
         "snapshot_context": {"recent_pattern": "short replies"},
     }
+
+
+def test_correction_history_preserves_order_and_adds_the_current_correction() -> None:
+    analyses = [
+        SimpleNamespace(
+            task_name="apply_correction",
+            result={
+                "correction_text": "Перше уточнення.",
+                "kind": "clarification_answer",
+                "question": "Що змінилося?",
+                "corrected_at": "2026-07-11T10:00:00+03:00",
+            },
+        ),
+        SimpleNamespace(
+            task_name="extract_entry_features",
+            result={},
+        ),
+    ]
+
+    history = _correction_history(
+        analyses,
+        extra_context={"correction_text": "Пізніше уточнення.", "clarification_context": {"question": "А зараз?"}},
+    )
+
+    assert [item["text"] for item in history] == ["Перше уточнення.", "Пізніше уточнення."]
+    assert history[-1]["kind"] == "clarification_answer"
+    assert history[-1]["question"] == "А зараз?"
 
 
 async def test_force_backfill_selects_existing_entries_for_reanalysis(monkeypatch) -> None:

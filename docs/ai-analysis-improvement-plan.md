@@ -141,6 +141,9 @@ Current implementation:
 - numeric metric buttons are a fallback when contextual AI clarification finds no useful natural question;
 - an active clarification or metric/emotion follow-up is persisted in settings, so scheduled snapshots wait for it, including across a bot restart/deploy;
 - scheduled snapshots and active follow-ups are serialized per user in the bot process, preventing competing prompts at the same time;
+- each entry-linked clarification keeps its question, answer, source, focus and expected information gain; later AI steps receive this compact chain rather than only the newest reply;
+- the same AI clarification call decides whether another question has material new value; it can end the chain without an arbitrary numerical cap;
+- entry-feature reanalysis receives the full ordered correction history, where newer user corrections override earlier interpretations and the original wording;
 - correction/profile bookkeeping entries are excluded from the cadence activity clock, so answering a deferred clarification does not falsely reset the rhythm of new snapshots.
 
 Target behavior:
