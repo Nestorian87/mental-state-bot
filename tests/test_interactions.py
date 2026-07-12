@@ -271,6 +271,37 @@ async def test_clarification_need_triggers_for_meaningful_missing_core_metric(mo
     assert should_clarify is True
     assert need["reason"] == "missing_mood"
     assert need["missing_metrics"] == ["mood"]
+    assert need["energy_gap_priority"] is False
+
+
+async def test_clarification_need_prioritizes_energy_gap_in_meaningful_moment(monkeypatch) -> None:
+    entry_id = uuid4()
+    feature_result = {
+        "mood": {"value": "somewhat_low", "confidence": 0.8},
+        "energy": {"value": "unclear", "confidence": 0.0},
+        "entry_type": "current_state",
+        "data_quality": "partial",
+        "confidence": 0.7,
+    }
+
+    async def list_analyses_for_targets(session, *, target_type, target_ids):
+        assert target_type == "entry"
+        assert target_ids == [entry_id]
+        return [SimpleNamespace(task_name="extract_entry_features", result=feature_result)]
+
+    monkeypatch.setattr(interactions_module.repo, "list_analyses_for_targets", list_analyses_for_targets)
+
+    should_clarify, need = await InteractionService(SimpleNamespace(), None)._clarification_need(
+        object(),
+        snapshot=SimpleNamespace(clarification_count=0),
+        text="Настрій просів, але я ще намагаюся довести справу до кінця",
+        entry=SimpleNamespace(id=entry_id),
+    )
+
+    assert should_clarify is True
+    assert need["reason"] == "missing_energy"
+    assert need["missing_metrics"] == ["energy"]
+    assert need["energy_gap_priority"] is True
 
 
 async def test_clarification_need_triggers_when_analysis_requests_it(monkeypatch) -> None:

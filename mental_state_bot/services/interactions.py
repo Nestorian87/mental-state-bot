@@ -706,6 +706,7 @@ class InteractionService:
             return False, {"reason": "features_missing"}
         features = EntryFeatures.model_validate(feature_analysis.result)
         missing_metrics = _missing_core_metrics(features)
+        energy_gap_priority = _prioritize_energy_gap(features, missing_metrics)
         if features.emotion_needs_clarification:
             return True, {
                 "reason": "emotion_transition_unclear",
@@ -716,6 +717,7 @@ class InteractionService:
                 "data_quality": features.data_quality,
                 "feature_confidence": features.confidence,
                 "uncertainty_notes": features.uncertainty_notes,
+                "energy_gap_priority": energy_gap_priority,
             }
         if features.needs_clarification:
             return True, {
@@ -730,6 +732,7 @@ class InteractionService:
                 "data_quality": features.data_quality,
                 "feature_confidence": features.confidence,
                 "uncertainty_notes": features.uncertainty_notes,
+                "energy_gap_priority": energy_gap_priority,
             }
         if missing_metrics and _should_offer_missing_metric_clarification(features):
             return True, {
@@ -739,6 +742,7 @@ class InteractionService:
                 "data_quality": features.data_quality,
                 "feature_confidence": features.confidence,
                 "uncertainty_notes": features.uncertainty_notes,
+                "energy_gap_priority": energy_gap_priority,
             }
         if features.data_quality in {"empty", "very_low"} or features.confidence < 0.35:
             return True, {
@@ -863,6 +867,11 @@ def _should_offer_missing_metric_clarification(features: EntryFeatures) -> bool:
         and features.data_quality in {"partial", "enough", "rich"}
         and features.confidence >= 0.4
     )
+
+
+def _prioritize_energy_gap(features: EntryFeatures, missing_metrics: list[str]) -> bool:
+    """Treat unknown energy in an otherwise useful moment as a real follow-up gap."""
+    return "energy" in missing_metrics and _should_offer_missing_metric_clarification(features)
 
 
 def _recent_similar_clarification_exists(
