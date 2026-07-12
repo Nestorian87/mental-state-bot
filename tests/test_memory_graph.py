@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import mental_state_bot.services.memory_graph as graph_module
 from mental_state_bot.ai.schemas import (
+    MemoryGraphDailyCandidate,
     MemoryGraphEdgeCandidate,
     MemoryGraphExtraction,
     MemoryGraphNodeCandidate,
@@ -13,10 +14,12 @@ from mental_state_bot.ai.schemas import (
     MemoryGraphReviewResult,
 )
 from mental_state_bot.services.memory_graph import (
+    apply_daily_memory_graph_candidates,
     apply_memory_graph_extraction,
     decay_memory_graph,
     format_personal_lexicon_view,
     maintain_memory_graph,
+    mark_fresh_memory_graph_duplicate_candidates,
     relevant_memory_context_for_text,
     review_memory_graph_duplicates,
 )
@@ -166,10 +169,14 @@ async def test_maintain_memory_graph_marks_possible_duplicates_without_staling(m
     async def list_nodes(session, *, user_id, limit):
         return [album, my_album]
 
+    async def list_evidence(session, *, user_id, node_ids, limit=2400):
+        return []
+
     async def list_edges(session, *, user_id, limit):
         return []
 
     monkeypatch.setattr(graph_module.repo, "list_memory_nodes", list_nodes)
+    monkeypatch.setattr(graph_module.repo, "list_memory_evidence_for_nodes", list_evidence)
     monkeypatch.setattr(graph_module.repo, "list_memory_edges", list_edges)
 
     result = await maintain_memory_graph(
@@ -218,6 +225,9 @@ async def test_review_memory_graph_duplicates_applies_high_confidence_alias(monk
     async def list_nodes(session, *, user_id, limit):
         return [album, my_album]
 
+    async def list_evidence(session, *, user_id, node_ids, limit=2400):
+        return []
+
     class FakeAIService:
         async def review_memory_graph_pairs(self, session, *, user_id, context):
             return (
@@ -236,6 +246,7 @@ async def test_review_memory_graph_duplicates_applies_high_confidence_alias(monk
             )
 
     monkeypatch.setattr(graph_module.repo, "list_memory_nodes", list_nodes)
+    monkeypatch.setattr(graph_module.repo, "list_memory_evidence_for_nodes", list_evidence)
 
     result = await review_memory_graph_duplicates(
         object(),
@@ -249,6 +260,78 @@ async def test_review_memory_graph_duplicates_applies_high_confidence_alias(monk
     assert "Мій проєкт" in album.aliases
     assert my_album.status == "stale"
     assert my_album.meta["duplicate_of"] == str(album_id)
+
+
+async def test_daily_model_candidates_only_mark_pairs_for_later_review(monkeypatch) -> None:
+    left = SimpleNamespace(id=uuid4(), label="Назва", meta={})
+    right = SimpleNamespace(id=uuid4(), label="Інша назва", meta={})
+
+    async def get_nodes(session, *, user_id, node_ids):
+        assert set(node_ids) == {left.id, right.id}
+        return [left, right]
+
+    monkeypatch.setattr(graph_module.repo, "get_memory_nodes_by_ids", get_nodes)
+
+    marked = await apply_daily_memory_graph_candidates(
+        object(),
+        user_id=uuid4(),
+        candidates=[
+            MemoryGraphDailyCandidate(
+                left_node_id=str(left.id),
+                right_node_id=str(right.id),
+                reason="схожа роль у нових записах",
+                confidence=0.72,
+            )
+        ],
+    )
+
+    assert marked == 1
+    assert left.meta["possible_duplicates"][0]["node_id"] == str(right.id)
+    assert right.meta["possible_duplicates"][0]["node_id"] == str(left.id)
+    assert "duplicate_of" not in left.meta
+    assert "duplicate_of" not in right.meta
+
+
+async def test_fresh_graph_maintenance_marks_only_pairs_touching_current_entry(monkeypatch) -> None:
+    fresh = SimpleNamespace(
+        id=uuid4(),
+        label="Проєкт",
+        aliases=["Мій проєкт"],
+        kind="project",
+        weight=0.6,
+        confidence=0.6,
+        status="candidate",
+        summary=None,
+        last_seen_at=datetime(2026, 7, 12, tzinfo=UTC),
+        meta={},
+    )
+    existing = SimpleNamespace(
+        id=uuid4(),
+        label="Мій проєкт",
+        aliases=[],
+        kind="project",
+        weight=0.8,
+        confidence=0.8,
+        status="hypothesis",
+        summary=None,
+        last_seen_at=datetime(2026, 7, 11, tzinfo=UTC),
+        meta={},
+    )
+
+    async def list_nodes(session, *, user_id, limit):
+        return [fresh, existing]
+
+    monkeypatch.setattr(graph_module.repo, "list_memory_nodes", list_nodes)
+
+    marked = await mark_fresh_memory_graph_duplicate_candidates(
+        object(),
+        user_id=uuid4(),
+        touched_node_ids={fresh.id},
+    )
+
+    assert marked == 1
+    assert fresh.meta["possible_duplicates"][0]["node_id"] == str(existing.id)
+    assert existing.meta["possible_duplicates"][0]["node_id"] == str(fresh.id)
 
 
 async def test_relevant_memory_context_matches_short_inflected_labels(monkeypatch) -> None:

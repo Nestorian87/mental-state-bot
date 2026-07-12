@@ -1083,6 +1083,30 @@ async def find_similar_embeddings(
     return result.scalars().all()
 
 
+async def list_embeddings_for_targets(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    target_type: str,
+    target_ids: Sequence[uuid.UUID],
+    limit: int = 1200,
+) -> Sequence[EmbeddingRecord]:
+    """Fetch existing vectors for bounded, local maintenance without new embedding calls."""
+    if not target_ids:
+        return []
+    result = await session.execute(
+        select(EmbeddingRecord)
+        .where(
+            EmbeddingRecord.user_id == user_id,
+            EmbeddingRecord.target_type == target_type,
+            EmbeddingRecord.target_id.in_(target_ids),
+        )
+        .order_by(EmbeddingRecord.target_id, desc(EmbeddingRecord.created_at))
+        .limit(limit)
+    )
+    return result.scalars().all()
+
+
 async def get_memory_nodes_by_normalized_labels(
     session: AsyncSession,
     *,
@@ -1148,6 +1172,27 @@ async def list_memory_evidence_for_export(session: AsyncSession, *, user_id: uui
     return result.scalars().all()
 
 
+async def list_memory_evidence_for_nodes(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    node_ids: Sequence[uuid.UUID],
+    limit: int = 2400,
+) -> Sequence[MemoryEvidence]:
+    if not node_ids:
+        return []
+    result = await session.execute(
+        select(MemoryEvidence)
+        .where(
+            MemoryEvidence.user_id == user_id,
+            MemoryEvidence.node_id.in_(node_ids),
+        )
+        .order_by(desc(MemoryEvidence.created_at))
+        .limit(limit)
+    )
+    return result.scalars().all()
+
+
 async def list_situation_nodes_for_entry_targets(
     session: AsyncSession,
     *,
@@ -1168,6 +1213,47 @@ async def list_situation_nodes_for_entry_targets(
         .order_by(desc(MemoryEvidence.created_at))
     )
     return result.all()
+
+
+async def list_memory_nodes_for_entry_targets(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    entry_ids: Sequence[uuid.UUID],
+) -> Sequence[MemoryNode]:
+    if not entry_ids:
+        return []
+    result = await session.execute(
+        select(MemoryNode)
+        .join(MemoryEvidence, MemoryEvidence.node_id == MemoryNode.id)
+        .where(
+            MemoryEvidence.user_id == user_id,
+            MemoryEvidence.target_type == "entry",
+            MemoryEvidence.target_id.in_(entry_ids),
+        )
+        .order_by(desc(MemoryEvidence.created_at))
+    )
+    seen: set[uuid.UUID] = set()
+    nodes: list[MemoryNode] = []
+    for node in result.scalars():
+        if node.id not in seen:
+            seen.add(node.id)
+            nodes.append(node)
+    return nodes
+
+
+async def get_memory_nodes_by_ids(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    node_ids: Sequence[uuid.UUID],
+) -> Sequence[MemoryNode]:
+    if not node_ids:
+        return []
+    result = await session.execute(
+        select(MemoryNode).where(MemoryNode.user_id == user_id, MemoryNode.id.in_(node_ids))
+    )
+    return result.scalars().all()
 
 
 async def delete_memory_graph(session: AsyncSession, *, user_id: uuid.UUID) -> None:

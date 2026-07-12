@@ -10,9 +10,14 @@ from mental_state_bot.ai.service import AIService
 from mental_state_bot.bot.keyboards import period_detail_keyboard, summary_detail_keyboard
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
-from mental_state_bot.services.memory_graph import maintain_memory_graph
+from mental_state_bot.services.memory_graph import (
+    maintain_memory_graph,
+    review_memory_graph_duplicates,
+)
 from mental_state_bot.services.preferences import (
+    memory_graph_last_consolidated_week,
     pending_input,
+    settings_json_with_memory_graph_consolidated_week,
     settings_json_without_pending_input,
 )
 from mental_state_bot.services.snapshots import maybe_send_scheduled_snapshot
@@ -67,6 +72,7 @@ def build_scheduler(
             "bot": bot,
             "settings": settings,
             "sessionmaker": sessionmaker,
+            "ai_service": ai_service,
             "summary_service": summary_service,
         },
         id="period_summary_tick",
@@ -140,6 +146,7 @@ async def period_summary_tick(
     bot: Bot,
     settings: Settings,
     sessionmaker: async_sessionmaker[AsyncSession],
+    ai_service: AIService,
     summary_service: SummaryService,
 ) -> None:
     async with sessionmaker() as session, session.begin():
@@ -164,10 +171,15 @@ async def period_summary_tick(
                         reply_markup=period_detail_keyboard(summary_id=str(weekly.id)),
                     )
                     await repo.mark_summary_delivered(session, summary_id=weekly.id, delivered_at=utc_now())
-                    try:
-                        await maintain_memory_graph(session, user_id=user.id)
-                    except Exception:
-                        logger.exception("Failed to maintain memory graph", extra={"user_id": str(user.id)})
+                try:
+                    await _run_weekly_memory_graph_consolidation(
+                        session,
+                        user=user,
+                        ai_service=ai_service,
+                        current_local=current_local,
+                    )
+                except Exception:
+                    logger.exception("Failed to consolidate memory graph", extra={"user_id": str(user.id)})
 
             if current_local.day == 1:
                 try:
@@ -182,3 +194,44 @@ async def period_summary_tick(
                         reply_markup=period_detail_keyboard(summary_id=str(monthly.id)),
                     )
                     await repo.mark_summary_delivered(session, summary_id=monthly.id, delivered_at=utc_now())
+
+
+async def _run_weekly_memory_graph_consolidation(
+    session: AsyncSession,
+    *,
+    user,
+    ai_service: AIService,
+    current_local,
+) -> None:
+    """Do one bounded, silent graph consolidation per local calendar week."""
+    settings = await repo.get_user_settings(session, user.id)
+    iso_year, iso_week, _ = current_local.isocalendar()
+    week_key = f"{iso_year}-W{iso_week:02d}"
+    if memory_graph_last_consolidated_week(settings) == week_key:
+        return
+
+    maintenance = await maintain_memory_graph(session, user_id=user.id)
+    review = await review_memory_graph_duplicates(
+        session,
+        user_id=user.id,
+        ai_service=ai_service,
+        pair_limit=12,
+        use_embedding_candidates=True,
+        use_heavy_reasoning=True,
+    )
+    await repo.update_user_settings(
+        session,
+        user_id=user.id,
+        values={"settings_json": settings_json_with_memory_graph_consolidated_week(settings, week_key)},
+    )
+    logger.info(
+        "Weekly memory graph consolidation completed",
+        extra={
+            "user_id": str(user.id),
+            "week": week_key,
+            "nodes_checked": maintenance.nodes_checked,
+            "candidate_pairs": review.pairs_selected,
+            "embedding_pairs": review.embedding_pairs_found,
+            "decisions": review.decisions_received,
+        },
+    )

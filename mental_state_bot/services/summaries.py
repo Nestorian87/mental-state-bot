@@ -21,6 +21,10 @@ from mental_state_bot.services.analysis_backfill import (
     postprocess_entry_features,
 )
 from mental_state_bot.services.journal_day import current_journal_date
+from mental_state_bot.services.memory_graph import (
+    apply_daily_memory_graph_candidates,
+    daily_memory_graph_review_context,
+)
 from mental_state_bot.services.period_analysis import build_period_analysis, compare_period_analyses
 from mental_state_bot.services.preferences import (
     clarification_queue,
@@ -265,6 +269,53 @@ class SummaryService:
             user_id=user.id,
             context=context,
         )
+        day_analyses = await repo.list_analyses_for_targets(
+            session,
+            target_type="day",
+            target_ids=[day.id],
+        )
+        if not any(item.task_name == "review_daily_memory_graph_changes" for item in day_analyses):
+            try:
+                graph_review_context = await daily_memory_graph_review_context(
+                    session,
+                    user_id=user.id,
+                    entry_ids=[entry.id for entry in entries],
+                )
+                if graph_review_context["nodes_changed_today"]:
+                    graph_review, graph_review_run_id = await self.ai.review_daily_memory_graph_changes(
+                        session,
+                        user_id=user.id,
+                        context=graph_review_context,
+                    )
+                    marked_graph_pairs = await apply_daily_memory_graph_candidates(
+                        session,
+                        user_id=user.id,
+                        candidates=graph_review.candidates,
+                    )
+                    await repo.add_ai_analysis(
+                        session,
+                        user_id=user.id,
+                        target_type="day",
+                        target_id=day.id,
+                        task_name="review_daily_memory_graph_changes",
+                        schema_version="memory_graph_daily_review.v1",
+                        provider=self.settings.ai_provider,
+                        model=self.settings.ai_live_model,
+                        result={
+                            **graph_review.model_dump(),
+                            "nodes_considered": len(graph_review_context["nodes_changed_today"]),
+                            "pairs_marked": marked_graph_pairs,
+                        },
+                        confidence=None,
+                        uncertainty_notes=graph_review.notes,
+                        model_run_id=graph_review_run_id,
+                    )
+            except Exception:
+                logger.warning(
+                    "Daily memory graph review failed",
+                    extra={"user_id": str(user.id), "day_id": str(day.id)},
+                    exc_info=True,
+                )
         details = daily.model_dump()
         raw_insight = getattr(daily, "semantic_memory_insight", None)
         insight = verified_semantic_memory_insight(

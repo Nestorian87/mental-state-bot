@@ -29,6 +29,7 @@ LIFE_CONTEXT_LAST_AUTO_OFFER_AT_KEY = "life_context_last_auto_offer_at"
 PLANNED_EVENTS_KEY = "planned_events"
 PENDING_PLANNED_EVENT_KEY = "pending_planned_event"
 PENDING_MEMORY_GRAPH_IMPORT_KEY = "pending_memory_graph_import"
+MEMORY_GRAPH_LAST_CONSOLIDATED_WEEK_KEY = "memory_graph_last_consolidated_week"
 WAKE_TIME_RECORDS_KEY = "wake_time_records"
 PENDING_INPUT_KINDS = {
     "custom_style",
@@ -370,6 +371,21 @@ def settings_json_with_pending_memory_graph_import(
     else:
         current[PENDING_MEMORY_GRAPH_IMPORT_KEY] = payload
     return current
+
+
+def memory_graph_last_consolidated_week(settings: UserSettings) -> str | None:
+    value = (getattr(settings, "settings_json", None) or {}).get(MEMORY_GRAPH_LAST_CONSOLIDATED_WEEK_KEY)
+    return str(value) if value else None
+
+
+def settings_json_with_memory_graph_consolidated_week(
+    settings: UserSettings,
+    week_key: str,
+) -> dict[str, Any]:
+    return {
+        **(getattr(settings, "settings_json", None) or {}),
+        MEMORY_GRAPH_LAST_CONSOLIDATED_WEEK_KEY: week_key,
+    }
 
 
 def pending_correction_entry_id(settings: UserSettings) -> str | None:

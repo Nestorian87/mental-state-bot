@@ -15,6 +15,7 @@ from mental_state_bot.ai.pricing import estimate_cost_usd, estimate_transcriptio
 from mental_state_bot.ai.prompts import (
     CLARIFICATION_PROMPT,
     CLARIFICATION_QUEUE_REVIEW_PROMPT,
+    DAILY_MEMORY_GRAPH_REVIEW_PROMPT,
     DAILY_SUMMARY_PROMPT,
     EVENING_REVIEW_PROMPT,
     EXTRACTION_PROMPT,
@@ -42,6 +43,7 @@ from mental_state_bot.ai.schemas import (
     LifeContextExtraction,
     LifeContextPruneResult,
     LifeContextRewriteResult,
+    MemoryGraphDailyReview,
     MemoryGraphExtraction,
     MemoryGraphReviewResult,
     MicroSummary,
@@ -303,23 +305,47 @@ class AIService:
         *,
         user_id: UUID,
         context: dict[str, Any],
+        use_heavy_reasoning: bool = False,
     ) -> tuple[MemoryGraphReviewResult, UUID | None]:
         route = Route(
-            model=self.settings.ai_live_model,
-            thinking=False,
+            model=self.settings.ai_heavy_model if use_heavy_reasoning else self.settings.ai_live_model,
+            thinking=self.settings.ai_heavy_thinking if use_heavy_reasoning else False,
             temperature=0.05,
         )
         fallback = MemoryGraphReviewResult(decisions=[], notes=["fallback"])
         return await self._json_task(
             session,
             user_id=user_id,
-            task_name="review_memory_graph_pairs",
+            task_name=("consolidate_memory_graph_weekly" if use_heavy_reasoning else "review_memory_graph_pairs"),
             route=route,
             schema_model=MemoryGraphReviewResult,
             system=SYSTEM_STYLE,
             prompt=MEMORY_GRAPH_REVIEW_PROMPT,
             payload=context,
             fallback=fallback,
+        )
+
+    async def review_daily_memory_graph_changes(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        context: dict[str, Any],
+    ) -> tuple[MemoryGraphDailyReview, UUID | None]:
+        return await self._json_task(
+            session,
+            user_id=user_id,
+            task_name="review_daily_memory_graph_changes",
+            route=Route(
+                model=self.settings.ai_live_model,
+                thinking=self.settings.ai_live_thinking,
+                temperature=0.05,
+            ),
+            schema_model=MemoryGraphDailyReview,
+            system=SYSTEM_STYLE,
+            prompt=DAILY_MEMORY_GRAPH_REVIEW_PROMPT,
+            payload=context,
+            fallback=MemoryGraphDailyReview(notes=["fallback"]),
         )
 
     async def extract_life_context_candidates(

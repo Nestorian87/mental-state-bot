@@ -187,8 +187,14 @@
 - [x] Базовий decay і щотижневе bounded послаблення ваг без AI.
 - [x] Cheap local maintenance: decay + possible duplicate candidates без auto-merge.
 - [x] Ручна bounded AI-ревізія possible duplicate pairs з обережним alias/stale для high-confidence непідтверджених вузлів.
+- [x] Умовна live-ревізія до двох сильних локальних duplicate-пар після нового запису: тільки коли
+  цей запис створив або оновив відповідні вузли, без окремого виклику за відсутності кандидатів.
+- [x] Окремий daily live-прохід по всіх вузлах, що отримали evidence з цього журнального дня; він
+  пропонує лише candidate-пари, не робить merge самостійно і не використовує semantic retrieval.
+- [x] Автоматична щотижнева bounded AI-ревізія duplicate-пар після cheap maintenance: вона
+  використовує thinking route та доповнює локальні кандидати схожістю вже наявних evidence embeddings.
 - [ ] Повна щотижнева AI-ревізія merge/contradiction.
-- [ ] Embeddings-assisted resolution near-duplicates.
+- [x] Embeddings-assisted resolution near-duplicates як кандидатний сигнал, а не автоматичне рішення.
 - [x] Retrieval малого підграфа для live-питань, аналізу запису та мікропідсумків.
 - [x] Звʼязування підтвердженого живого контексту з графом без окремого AI-виклику.
 - [x] Retrieval logs для семантичної памʼяті та локального графового retrieval.

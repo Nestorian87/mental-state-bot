@@ -25,6 +25,7 @@ class MemoryGraphUpdateResult:
     nodes_created: int = 0
     edges_seen: int = 0
     edges_created: int = 0
+    touched_node_ids: tuple[uuid.UUID, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class MemoryGraphMaintenanceResult:
 @dataclass(frozen=True)
 class MemoryGraphAIReviewResult:
     pairs_selected: int = 0
+    embedding_pairs_found: int = 0
     decisions_received: int = 0
     aliases_added: int = 0
     nodes_staled_as_duplicate: int = 0
@@ -172,20 +174,90 @@ async def maintain_memory_graph(
     )
 
 
+async def mark_fresh_memory_graph_duplicate_candidates(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    touched_node_ids: set[uuid.UUID],
+    node_limit: int = 800,
+) -> int:
+    """Cheaply refresh only duplicate candidates touched by the current entry."""
+    if not touched_node_ids:
+        return 0
+    nodes = list(await repo.list_memory_nodes(session, user_id=user_id, limit=node_limit))
+    current_time = utc_now()
+    changed_pairs = 0
+    for keeper, duplicate, score, reason in _potential_duplicate_nodes(nodes):
+        if keeper.id not in touched_node_ids and duplicate.id not in touched_node_ids:
+            continue
+        changed = _mark_possible_duplicate(
+            duplicate,
+            other=keeper,
+            score=score,
+            reason=reason,
+            checked_at=current_time,
+        )
+        changed = (
+            _mark_possible_duplicate(
+                keeper,
+                other=duplicate,
+                score=score,
+                reason=reason,
+                checked_at=current_time,
+            )
+            or changed
+        )
+        if changed:
+            changed_pairs += 1
+    return changed_pairs
+
+
 async def review_memory_graph_duplicates(
     session: AsyncSession,
     *,
     user_id: uuid.UUID,
     ai_service: AIService,
     pair_limit: int = 12,
+    use_embedding_candidates: bool = False,
+    use_heavy_reasoning: bool = False,
+    only_node_ids: set[uuid.UUID] | None = None,
 ) -> MemoryGraphAIReviewResult:
     nodes = list(await repo.list_memory_nodes(session, user_id=user_id, limit=800))
-    pairs = _review_candidate_pairs(nodes, limit=pair_limit)
+    pairs = _review_candidate_pairs(nodes, limit=pair_limit, only_node_ids=only_node_ids)
+    embedding_pairs_found = 0
+    evidence_by_node: dict[str, list[dict[str, Any]]] = {}
+    if use_embedding_candidates:
+        evidence_by_node = await _review_evidence_by_node(session, user_id=user_id, nodes=nodes)
+        embedding_pairs = await _embedding_duplicate_pairs(
+            session,
+            user_id=user_id,
+            nodes=nodes,
+            evidence_by_node=evidence_by_node,
+            limit=pair_limit,
+            only_node_ids=only_node_ids,
+        )
+        embedding_pairs_found = len(embedding_pairs)
+        pairs = _combine_review_pairs([*pairs, *embedding_pairs], limit=pair_limit)
     if not pairs:
-        return MemoryGraphAIReviewResult()
+        return MemoryGraphAIReviewResult(embedding_pairs_found=embedding_pairs_found)
 
-    context = {"pairs": [_review_pair_payload(pair) for pair in pairs]}
-    review, run_id = await ai_service.review_memory_graph_pairs(session, user_id=user_id, context=context)
+    if not evidence_by_node:
+        evidence_by_node = await _review_evidence_by_node(session, user_id=user_id, nodes=nodes)
+    context = {
+        "pairs": [
+            _review_pair_payload(pair, evidence_by_node=evidence_by_node)
+            for pair in pairs
+        ]
+    }
+    if use_heavy_reasoning:
+        review, run_id = await ai_service.review_memory_graph_pairs(
+            session,
+            user_id=user_id,
+            context=context,
+            use_heavy_reasoning=True,
+        )
+    else:
+        review, run_id = await ai_service.review_memory_graph_pairs(session, user_id=user_id, context=context)
     decisions = {decision.pair_id: decision for decision in review.decisions}
     aliases_added = nodes_staled = separate = needs_confirmation = 0
 
@@ -208,6 +280,7 @@ async def review_memory_graph_duplicates(
 
     return MemoryGraphAIReviewResult(
         pairs_selected=len(pairs),
+        embedding_pairs_found=embedding_pairs_found,
         decisions_received=len(decisions),
         aliases_added=aliases_added,
         nodes_staled_as_duplicate=nodes_staled,
@@ -215,6 +288,74 @@ async def review_memory_graph_duplicates(
         pairs_needing_confirmation=needs_confirmation,
         run_id=run_id,
     )
+
+
+async def daily_memory_graph_review_context(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    entry_ids: list[uuid.UUID],
+) -> dict[str, Any]:
+    """Build the bounded daily graph slice for a dedicated model review."""
+    nodes = list(await repo.list_memory_nodes_for_entry_targets(session, user_id=user_id, entry_ids=entry_ids))
+    if len(nodes) < 2:
+        return {"nodes_changed_today": []}
+    evidence_by_node = await _review_evidence_by_node(session, user_id=user_id, nodes=nodes)
+    return {
+        "nodes_changed_today": [
+            _review_node_payload(node, evidence=evidence_by_node.get(str(node.id), [])) for node in nodes[:80]
+        ]
+    }
+
+
+async def apply_daily_memory_graph_candidates(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    candidates: list[Any],
+) -> int:
+    """Store AI-suggested daily pairs as candidates; never merge them directly."""
+    node_ids: set[uuid.UUID] = set()
+    for candidate in candidates:
+        for value in (getattr(candidate, "left_node_id", None), getattr(candidate, "right_node_id", None)):
+            with suppress(ValueError, TypeError):
+                node_ids.add(uuid.UUID(str(value)))
+    nodes = {
+        str(node.id): node
+        for node in await repo.get_memory_nodes_by_ids(session, user_id=user_id, node_ids=list(node_ids))
+    }
+    marked_pairs: set[tuple[str, str]] = set()
+    now = utc_now()
+    for candidate in candidates:
+        left = nodes.get(str(getattr(candidate, "left_node_id", "")))
+        right = nodes.get(str(getattr(candidate, "right_node_id", "")))
+        if left is None or right is None or left.id == right.id:
+            continue
+        pair_key = tuple(sorted([str(left.id), str(right.id)]))
+        if pair_key in marked_pairs or _already_reviewed_separate(left, right):
+            continue
+        confidence = max(0.5, min(0.95, float(getattr(candidate, "confidence", 0.0) or 0.0)))
+        reason = _compact(str(getattr(candidate, "reason", "") or ""))[:180] or "daily_model_candidate"
+        changed = _mark_possible_duplicate(
+            left,
+            other=right,
+            score=confidence,
+            reason=f"daily_model_candidate: {reason}",
+            checked_at=now,
+        )
+        changed = (
+            _mark_possible_duplicate(
+                right,
+                other=left,
+                score=confidence,
+                reason=f"daily_model_candidate: {reason}",
+                checked_at=now,
+            )
+            or changed
+        )
+        if changed:
+            marked_pairs.add(pair_key)
+    return len(marked_pairs)
 
 
 async def decay_memory_graph(
@@ -309,6 +450,7 @@ async def apply_memory_graph_extraction(
 ) -> MemoryGraphUpdateResult:
     now = entry.created_at or utc_now()
     nodes_by_label: dict[str, MemoryNode] = {}
+    touched_node_ids: set[uuid.UUID] = set()
     nodes_created = 0
     for candidate in extraction.nodes[:8]:
         label = _clean_label(candidate.label)
@@ -341,6 +483,7 @@ async def apply_memory_graph_extraction(
         _record_personal_lexicon_evidence(node, seen_at=now)
         _record_situation_evidence(node, seen_at=now)
         nodes_by_label[_normalize_label(label)] = node
+        touched_node_ids.add(node.id)
         nodes_created += int(created)
 
     edges_created = 0
@@ -367,6 +510,7 @@ async def apply_memory_graph_extraction(
             )
             nodes_by_label[_normalize_label(source_label)] = source
             nodes_created += int(created)
+        touched_node_ids.add(source.id)
         target = nodes_by_label.get(_normalize_label(target_label))
         if target is None:
             target, created = await _upsert_node(
@@ -383,6 +527,7 @@ async def apply_memory_graph_extraction(
             )
             nodes_by_label[_normalize_label(target_label)] = target
             nodes_created += int(created)
+        touched_node_ids.add(target.id)
         if source.id == target.id:
             continue
         edge, created = await _upsert_edge(
@@ -415,6 +560,7 @@ async def apply_memory_graph_extraction(
         nodes_created=nodes_created,
         edges_seen=min(len(extraction.edges), 8),
         edges_created=edges_created,
+        touched_node_ids=tuple(sorted(touched_node_ids, key=str)),
     )
 
 
@@ -976,10 +1122,177 @@ def _mark_possible_duplicate(
     return changed
 
 
+async def _review_evidence_by_node(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    nodes: list[MemoryNode],
+) -> dict[str, list[dict[str, Any]]]:
+    evidence = await repo.list_memory_evidence_for_nodes(
+        session,
+        user_id=user_id,
+        node_ids=[node.id for node in nodes],
+    )
+    result: dict[str, list[dict[str, Any]]] = {}
+    for item in evidence:
+        if item.node_id is None:
+            continue
+        node_id = str(item.node_id)
+        bucket = result.setdefault(node_id, [])
+        if len(bucket) >= 3:
+            continue
+        bucket.append(
+            {
+                "target_type": item.target_type,
+                "target_id": str(item.target_id),
+                "text": _compact(item.evidence_text)[:320],
+                "confidence": float(item.confidence or 0),
+            }
+        )
+    return result
+
+
+async def _embedding_duplicate_pairs(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    nodes: list[MemoryNode],
+    evidence_by_node: dict[str, list[dict[str, Any]]],
+    limit: int,
+    only_node_ids: set[uuid.UUID] | None,
+) -> list[tuple[str, MemoryNode, MemoryNode, dict[str, Any]]]:
+    """Use existing entry vectors as a candidate signal, never as a merge decision."""
+    entry_ids = {
+        uuid.UUID(str(item["target_id"]))
+        for evidence in evidence_by_node.values()
+        for item in evidence
+        if item.get("target_type") == "entry" and item.get("target_id")
+    }
+    if len(entry_ids) < 2:
+        return []
+    records = await repo.list_embeddings_for_targets(
+        session,
+        user_id=user_id,
+        target_type="entry",
+        target_ids=list(entry_ids),
+    )
+    latest_vectors: dict[str, list[float]] = {}
+    for record in records:
+        entry_id = str(record.target_id)
+        if entry_id in latest_vectors:
+            continue
+        vector = [float(value) for value in (record.embedding or [])]
+        if vector:
+            latest_vectors[entry_id] = vector
+
+    node_vectors: dict[str, list[list[float]]] = {}
+    for node in nodes:
+        vectors = [
+            latest_vectors[str(item["target_id"])]
+            for item in evidence_by_node.get(str(node.id), [])
+            if item.get("target_type") == "entry" and str(item.get("target_id")) in latest_vectors
+        ]
+        if vectors:
+            node_vectors[str(node.id)] = vectors[:3]
+
+    candidates: list[tuple[float, str, MemoryNode, MemoryNode, dict[str, Any]]] = []
+    for index, left in enumerate(nodes):
+        left_vectors = node_vectors.get(str(left.id))
+        if not left_vectors:
+            continue
+        for right in nodes[index + 1 :]:
+            right_vectors = node_vectors.get(str(right.id))
+            if not right_vectors or not _compatible_duplicate_kinds(left, right):
+                continue
+            if only_node_ids is not None and left.id not in only_node_ids and right.id not in only_node_ids:
+                continue
+            if _already_reviewed_separate(left, right):
+                continue
+            similarity = _max_cosine_similarity(left_vectors, right_vectors)
+            if similarity < 0.88:
+                continue
+            pair_key = tuple(sorted([str(left.id), str(right.id)]))
+            pair_id = f"{pair_key[0]}:{pair_key[1]}"
+            candidates.append(
+                (
+                    similarity,
+                    pair_id,
+                    left,
+                    right,
+                    {
+                        "score": round(similarity, 4),
+                        "reason": "embedding_evidence_similarity",
+                        "signal_sources": ["embedding"],
+                    },
+                )
+            )
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [(pair_id, left, right, candidate) for _, pair_id, left, right, candidate in candidates[:limit]]
+
+
+def _compatible_duplicate_kinds(left: MemoryNode, right: MemoryNode) -> bool:
+    return left.kind == right.kind or "concept" in {left.kind, right.kind}
+
+
+def _already_reviewed_separate(left: MemoryNode, right: MemoryNode) -> bool:
+    target_ids = {str(left.id), str(right.id)}
+    for node in (left, right):
+        reviewed = list((node.meta or {}).get("reviewed_separate_from") or [])
+        if any(str(item.get("node_id") or "") in target_ids - {str(node.id)} for item in reviewed if isinstance(item, dict)):
+            return True
+    return False
+
+
+def _max_cosine_similarity(left_vectors: list[list[float]], right_vectors: list[list[float]]) -> float:
+    best = 0.0
+    for left in left_vectors:
+        left_norm = sum(value * value for value in left) ** 0.5
+        if left_norm == 0:
+            continue
+        for right in right_vectors:
+            if len(left) != len(right):
+                continue
+            right_norm = sum(value * value for value in right) ** 0.5
+            if right_norm == 0:
+                continue
+            similarity = sum(a * b for a, b in zip(left, right, strict=True)) / (left_norm * right_norm)
+            best = max(best, similarity)
+    return best
+
+
+def _combine_review_pairs(
+    pairs: list[tuple[str, MemoryNode, MemoryNode, dict[str, Any]]],
+    *,
+    limit: int,
+) -> list[tuple[str, MemoryNode, MemoryNode, dict[str, Any]]]:
+    combined: dict[str, tuple[str, MemoryNode, MemoryNode, dict[str, Any]]] = {}
+    for pair_id, left, right, candidate in pairs:
+        existing = combined.get(pair_id)
+        if existing is None:
+            combined[pair_id] = (pair_id, left, right, dict(candidate))
+            continue
+        _, _, _, previous = existing
+        sources = list(dict.fromkeys([*(previous.get("signal_sources") or []), *(candidate.get("signal_sources") or [])]))
+        if previous.get("reason"):
+            sources.append(str(previous["reason"]))
+        if candidate.get("reason"):
+            sources.append(str(candidate["reason"]))
+        merged = {
+            **previous,
+            "score": max(float(previous.get("score") or 0), float(candidate.get("score") or 0)),
+            "reason": " + ".join(dict.fromkeys(sources))[:180],
+            "signal_sources": list(dict.fromkeys(sources))[:4],
+        }
+        combined[pair_id] = (pair_id, left, right, merged)
+    ranked = sorted(combined.values(), key=lambda item: float(item[3].get("score") or 0), reverse=True)
+    return ranked[:limit]
+
+
 def _review_candidate_pairs(
     nodes: list[MemoryNode],
     *,
     limit: int,
+    only_node_ids: set[uuid.UUID] | None = None,
 ) -> list[tuple[str, MemoryNode, MemoryNode, dict[str, Any]]]:
     by_id = {str(node.id): node for node in nodes}
     pairs: list[tuple[float, str, MemoryNode, MemoryNode, dict[str, Any]]] = []
@@ -990,6 +1303,8 @@ def _review_candidate_pairs(
                 continue
             other = by_id.get(str(candidate.get("node_id") or ""))
             if other is None or other.id == node.id:
+                continue
+            if only_node_ids is not None and node.id not in only_node_ids and other.id not in only_node_ids:
                 continue
             pair_key = tuple(sorted([str(node.id), str(other.id)]))
             if pair_key in seen:
@@ -1004,6 +1319,8 @@ def _review_candidate_pairs(
 
 def _review_pair_payload(
     pair: tuple[str, MemoryNode, MemoryNode, dict[str, Any]],
+    *,
+    evidence_by_node: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     pair_id, left, right, candidate = pair
     return {
@@ -1012,11 +1329,14 @@ def _review_pair_payload(
             "score": candidate.get("score"),
             "reason": candidate.get("reason"),
         },
-        "nodes": [_review_node_payload(left), _review_node_payload(right)],
+        "nodes": [
+            _review_node_payload(left, evidence=(evidence_by_node or {}).get(str(left.id), [])),
+            _review_node_payload(right, evidence=(evidence_by_node or {}).get(str(right.id), [])),
+        ],
     }
 
 
-def _review_node_payload(node: MemoryNode) -> dict[str, Any]:
+def _review_node_payload(node: MemoryNode, *, evidence: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "id": str(node.id),
         "label": node.label,
@@ -1036,6 +1356,7 @@ def _review_node_payload(node: MemoryNode) -> dict[str, Any]:
             for item in list((node.meta or {}).get("possible_duplicates") or [])[:3]
             if isinstance(item, dict)
         ],
+        "evidence": list(evidence or [])[:3],
     }
 
 

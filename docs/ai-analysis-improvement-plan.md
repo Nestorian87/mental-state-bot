@@ -317,6 +317,18 @@ Still deliberately outside this flow:
 
 ## Priority 6: Contextual Life Graph V2
 
+Recent maintenance behavior:
+
+- a newly updated graph node can trigger a tiny live duplicate review only when it forms a strong local
+  candidate pair; ordinary entries do not add a new review call;
+- closing a journal day runs a separate live review over all nodes that received evidence from that day.
+  It proposes candidate pairs from node summaries, aliases and evidence, rather than using semantic retrieval;
+- weekly maintenance runs once per local ISO week after cheap decay. It asks the heavy/thinking route to
+  resolve a bounded set of candidates, including near-duplicate candidates derived from existing entry
+  embeddings. Embedding similarity is evidence for review, never a reason to merge automatically;
+- candidates remain inspectable graph hypotheses. High-confidence unconfirmed aliases can be consolidated;
+  sensitive, confirmed or ambiguous pairs remain separate pending an explicit confirmation flow.
+
 Build on the implemented v1 graph foundation and make it useful during actual bot reasoning.
 
 Core idea:

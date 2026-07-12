@@ -302,6 +302,18 @@ class DailyTurningPoint(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
 
 
+class MemoryGraphDailyCandidate(BaseModel):
+    left_node_id: str
+    right_node_id: str
+    reason: str | None = None
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+
+class MemoryGraphDailyReview(BaseModel):
+    candidates: list[MemoryGraphDailyCandidate] = Field(default_factory=list, max_length=8)
+    notes: list[str] = Field(default_factory=list)
+
+
 class DailySummary(BaseModel):
     short_text: str
     story: str

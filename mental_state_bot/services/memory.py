@@ -15,7 +15,9 @@ from mental_state_bot.db import repositories as repo
 from mental_state_bot.db.models import Entry
 from mental_state_bot.services.memory_graph import (
     apply_memory_graph_extraction,
+    mark_fresh_memory_graph_duplicate_candidates,
     relevant_memory_context_for_text,
+    review_memory_graph_duplicates,
 )
 from mental_state_bot.services.preferences import life_context_items
 
@@ -49,6 +51,7 @@ class MemoryService:
             semantic_text=semantic_text.text,
             extraction=MemoryGraphExtraction.model_validate(semantic_text.graph),
             model_run_id=model_run_id,
+            review_fresh_candidates=not replace_existing,
         )
         if not self.settings.embeddings_enabled:
             return
@@ -143,6 +146,7 @@ class MemoryService:
         semantic_text: str,
         extraction: MemoryGraphExtraction,
         model_run_id: UUID | None,
+        review_fresh_candidates: bool,
     ) -> None:
         try:
             result = await apply_memory_graph_extraction(
@@ -161,6 +165,28 @@ class MemoryService:
                     "edges_created": result.edges_created,
                 },
             )
+            if review_fresh_candidates and result.touched_node_ids:
+                fresh_pairs = await mark_fresh_memory_graph_duplicate_candidates(
+                    session,
+                    user_id=user_id,
+                    touched_node_ids=set(result.touched_node_ids),
+                )
+                review = await review_memory_graph_duplicates(
+                    session,
+                    user_id=user_id,
+                    ai_service=self.ai,
+                    pair_limit=2,
+                    only_node_ids=set(result.touched_node_ids),
+                )
+                if fresh_pairs and review.pairs_selected:
+                    logger.debug(
+                        "Fresh memory graph candidates reviewed",
+                        extra={
+                            "entry_id": str(entry.id),
+                            "pairs_selected": review.pairs_selected,
+                            "decisions_received": review.decisions_received,
+                        },
+                    )
             if model_run_id:
                 run = await repo.get_model_run(session, model_run_id=model_run_id)
                 if run is not None:
