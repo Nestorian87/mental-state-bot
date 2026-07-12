@@ -57,7 +57,6 @@ from mental_state_bot.bot.keyboards import (
     period_detail_keyboard,
     planned_event_offer_keyboard,
     quiet_menu_keyboard,
-    quiet_offer_keyboard,
     reanalysis_confirmation_keyboard,
     reanalysis_scope_keyboard,
     settings_capture_keyboard,
@@ -127,8 +126,6 @@ from mental_state_bot.services.planned_events import (
 from mental_state_bot.services.preferences import (
     adaptive_observation_enabled,
     clarification_queue,
-    context_quiet_enabled,
-    context_quiet_last_check_at,
     custom_interaction_style,
     life_context_items,
     memory_graph_confirmation_queue,
@@ -146,9 +143,6 @@ from mental_state_bot.services.preferences import (
     quiet_until,
     settings_json_with_adaptive_observation,
     settings_json_with_clarification_queue,
-    settings_json_with_context_quiet,
-    settings_json_with_context_quiet_last_check,
-    settings_json_with_context_quiet_last_offer,
     settings_json_with_custom_interaction_style,
     settings_json_with_memory_graph_confirmation_last_offer,
     settings_json_with_memory_graph_confirmation_queue,
@@ -403,7 +397,7 @@ async def costs_command_handler(
     async with sessionmaker() as session, session.begin():
         user = await _get_or_create_message_user(session, message, settings)
         text = await format_cost_report(session, user=user)
-    await _answer_long_text(message, text)
+    await _answer_long_text(message, text, reply_markup=data_menu_keyboard())
 
 
 @router.message(Command("audit"))
@@ -2277,7 +2271,7 @@ async def costs_callback_handler(
         user = await _get_or_create_callback_user(session, callback, settings)
         text = await format_cost_report(session, user=user)
     await callback.answer()
-    await _answer_long_text(callback.message, text)
+    await _answer_long_text(callback.message, text, reply_markup=data_menu_keyboard())
 
 
 @router.callback_query(F.data == "archive:audit")
@@ -2492,13 +2486,6 @@ async def settings_callback_handler(
                 values={"settings_json": settings_json_with_snapshot_pause(user_settings, not snapshots_paused(user_settings))},
             )
             notice = "Автоматичні зрізи оновлено."
-        elif action == "settings:toggle:context_quiet":
-            user_settings = await repo.update_user_settings(
-                session,
-                user_id=user.id,
-                values={"settings_json": settings_json_with_context_quiet(user_settings, not context_quiet_enabled(user_settings))},
-            )
-            notice = "Контекстну тишу оновлено."
         elif action == "settings:pause":
             await repo.set_user_active(session, user_id=user.id, is_active=True)
             user_settings = await repo.update_user_settings(
@@ -3323,17 +3310,6 @@ async def entry_handler(
             )
         )
         asyncio.create_task(
-            _maybe_offer_quiet_pause_task(
-                bot=bot,
-                settings=settings,
-                sessionmaker=sessionmaker,
-                ai_service=interaction_service.ai,
-                entry_id=entry_id,
-                user_id=user_id,
-                chat_id=message.chat.id,
-            )
-        )
-        asyncio.create_task(
             _maybe_offer_planned_event_task(
                 bot=bot,
                 settings=settings,
@@ -3576,9 +3552,6 @@ async def quiet_callback_handler(
                 reply_markup=main_reply_keyboard("Наприклад: до 18:30"),
             )
             return
-        elif action == "quiet:offer:no":
-            text = "Ок, не ставлю паузу."
-            keyboard = None
         elif action.startswith("quiet:set:"):
             preset = action.rsplit(":", maxsplit=1)[1]
             until = _quiet_until_for_preset(preset, timezone=user.timezone)
@@ -4517,77 +4490,6 @@ async def _maybe_offer_wake_time_task(
         )
     except Exception:
         logger.exception("Background wake time offer task failed", extra={"user_id": str(user_id)})
-
-
-async def _maybe_offer_quiet_pause_task(
-    *,
-    bot: Bot,
-    settings: Settings,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    ai_service: AIService,
-    entry_id: UUID,
-    user_id: UUID,
-    chat_id: int,
-) -> None:
-    try:
-        async with sessionmaker() as session, session.begin():
-            user = await session.get(User, user_id)
-            entry = await repo.get_entry(session, entry_id=entry_id)
-            if user is None or entry is None:
-                return
-            if settings.telegram_allowed_user_ids and user.telegram_user_id not in settings.telegram_allowed_user_ids:
-                return
-            user_settings = await repo.get_user_settings(session, user.id)
-            if not context_quiet_enabled(user_settings) or quiet_is_active(user_settings):
-                return
-            now = datetime.now(UTC)
-            last_check = context_quiet_last_check_at(user_settings)
-            if last_check and now - last_check < timedelta(minutes=90):
-                return
-            await repo.update_user_settings(
-                session,
-                user_id=user.id,
-                values={"settings_json": settings_json_with_context_quiet_last_check(user_settings, now)},
-            )
-            recent_entries = await repo.get_recent_entries(session, user_id=user.id, limit=3)
-            suggestion, _run_id = await ai_service.suggest_quiet_pause(
-                session,
-                user_id=user.id,
-                context={
-                    "latest_entry": {
-                        "raw_text": entry.raw_text,
-                        "source": entry.source,
-                        "created_at": entry.created_at.isoformat() if entry.created_at else None,
-                    },
-                    "recent_entries": [
-                        {
-                            "raw_text": item.raw_text,
-                            "source": item.source,
-                            "created_at": item.created_at.isoformat() if item.created_at else None,
-                        }
-                        for item in recent_entries
-                    ],
-                    "life_context": [
-                        {
-                            "label": item.get("label"),
-                            "value": item.get("answer") or item.get("value") or item.get("hypothesis"),
-                        }
-                        for item in life_context_items(user_settings)[-8:]
-                        if isinstance(item, dict)
-                    ],
-                },
-            )
-            if not suggestion.should_offer or suggestion.confidence < 0.65:
-                return
-            await repo.update_user_settings(
-                session,
-                user_id=user.id,
-                values={"settings_json": settings_json_with_context_quiet_last_offer(user_settings, now)},
-            )
-            text = suggestion.message or "Схоже, зараз може бути незручно відповідати. Поставити тиху паузу?"
-        await bot.send_message(chat_id=chat_id, text=text, reply_markup=quiet_offer_keyboard())
-    except Exception:
-        logger.exception("Background quiet pause offer task failed", extra={"user_id": str(user_id)})
 
 
 async def _maybe_offer_planned_event_task(
@@ -5715,7 +5617,6 @@ def _format_settings_text(*, user_settings: UserSettings, snapshots_are_paused: 
     status = "на паузі" if snapshots_are_paused else "увімкнені"
     body = "так" if user_settings.ask_body_signals else "ні"
     photo = "так" if user_settings.photo_prompts_enabled else "ні"
-    context_quiet = "так" if context_quiet_enabled(user_settings) else "ні"
     adaptive_observation = "так" if adaptive_observation_enabled(user_settings) else "ні"
     quiet_status = _quiet_status_text(user_settings, timezone=getattr(user_settings, "timezone", "Europe/Kyiv"))
     custom_style = custom_interaction_style(user_settings)
@@ -5741,7 +5642,6 @@ def _format_settings_text(*, user_settings: UserSettings, snapshots_are_paused: 
             f"Нагадування після: {user_settings.reminder_delay_minutes} хв",
             f"Питати про тіло: {body}",
             f"Фото-підказки: {photo}",
-            f"Контекстна тиша: {context_quiet}",
             quiet_status,
             "",
             "Точні команди:",
@@ -5767,8 +5667,6 @@ def _settings_keyboard_for_action(action: str, *, user_settings: UserSettings):
         return settings_style_keyboard(user_settings=user_settings)
     if action == "settings:section:capture" or action in {"settings:toggle:body", "settings:toggle:photo"}:
         return settings_capture_keyboard(user_settings=user_settings)
-    if action == "settings:toggle:context_quiet":
-        return settings_keyboard(user_settings=user_settings)
     return settings_keyboard(user_settings=user_settings)
 
 

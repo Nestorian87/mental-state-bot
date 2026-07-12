@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, delete, desc, func, select, update
+from sqlalchemy import and_, case, delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mental_state_bot.db.models import (
@@ -729,6 +729,7 @@ async def model_run_cost_totals(
             func.coalesce(func.sum(ModelRun.completion_tokens), 0),
             func.coalesce(func.sum(ModelRun.reasoning_tokens), 0),
             func.coalesce(func.sum(ModelRun.total_tokens), 0),
+            func.coalesce(func.sum(case((ModelRun.estimated_cost_usd.is_not(None), 1), else_=0)), 0),
         ).where(ModelRun.user_id == user_id, ModelRun.created_at >= since)
     )
     row = result.one()
@@ -739,6 +740,7 @@ async def model_run_cost_totals(
         "completion_tokens": int(row[3] or 0),
         "reasoning_tokens": int(row[4] or 0),
         "total_tokens": int(row[5] or 0),
+        "estimated_runs": int(row[6] or 0),
     }
 
 

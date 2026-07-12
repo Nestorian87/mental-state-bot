@@ -57,7 +57,6 @@ from mental_state_bot.bot.keyboards import (
     period_detail_keyboard,
     planned_event_offer_keyboard,
     quiet_menu_keyboard,
-    quiet_offer_keyboard,
     reanalysis_confirmation_keyboard,
     settings_capture_keyboard,
     settings_rhythm_keyboard,
@@ -71,7 +70,6 @@ from mental_state_bot.bot.keyboards import (
 )
 from mental_state_bot.services.preferences import (
     clarification_queue,
-    context_quiet_enabled,
     custom_interaction_style,
     pending_clarification,
     pending_correction_entry_id,
@@ -81,7 +79,6 @@ from mental_state_bot.services.preferences import (
     pending_voice_transcript,
     quiet_is_active,
     settings_json_with_clarification_queue,
-    settings_json_with_context_quiet,
     settings_json_with_custom_interaction_style,
     settings_json_with_pending_clarification,
     settings_json_with_pending_correction_entry_id,
@@ -133,12 +130,9 @@ def test_main_reply_keyboard_stays_small() -> None:
 
 def test_quiet_keyboards_expose_pause_actions() -> None:
     menu = quiet_menu_keyboard(active=True)
-    offer = quiet_offer_keyboard()
     menu_callbacks = [button.callback_data for row in menu.inline_keyboard for button in row]
-    offer_callbacks = [button.callback_data for row in offer.inline_keyboard for button in row]
 
     assert {"quiet:set:1h", "quiet:set:2h", "quiet:custom", "quiet:cancel"} <= set(menu_callbacks)
-    assert {"quiet:set:1h", "quiet:set:2h", "quiet:offer:no"} <= set(offer_callbacks)
 
 
 def test_help_text_mentions_core_commands() -> None:
@@ -623,6 +617,7 @@ def test_submenus_expose_grouped_actions() -> None:
     assert "menu:memory:rebuild" in technical_callbacks
     assert "menu:data:export" in data_callbacks
     assert "menu:data:diagnostics" in data_callbacks
+    assert "ai:costs" in data_callbacks
     assert "archive:export_zip" in export_callbacks
     assert "archive:audit" in diagnostics_callbacks
     assert "menu:data:reanalyze" in data_callbacks
@@ -979,13 +974,6 @@ def test_quiet_until_preferences_preserve_settings_json() -> None:
     assert quiet_is_active(SimpleNamespace(settings_json=updated), datetime(2026, 7, 4, 14, 0, tzinfo=UTC))
     assert not quiet_is_active(SimpleNamespace(settings_json=updated), datetime(2026, 7, 4, 16, 0, tzinfo=UTC))
     assert settings_json_with_quiet_until(SimpleNamespace(settings_json=updated), None) == {"other": "value"}
-
-
-def test_context_quiet_preferences_default_enabled() -> None:
-    settings = SimpleNamespace(settings_json={})
-
-    assert context_quiet_enabled(settings)
-    assert not context_quiet_enabled(SimpleNamespace(settings_json=settings_json_with_context_quiet(settings, False)))
 
 
 def test_parse_quiet_until_text_accepts_time_and_duration() -> None:

@@ -37,13 +37,6 @@ class QuestionResult(BaseModel):
     semantic_memory_insight: SemanticMemoryInsight = Field(default_factory=SemanticMemoryInsight)
 
 
-class QuietSuggestion(BaseModel):
-    should_offer: bool = False
-    message: str | None = None
-    reason: str | None = None
-    confidence: float = Field(default=0.0, ge=0, le=1)
-
-
 class ClarificationResult(BaseModel):
     question: str = ""
     options: list[str] = Field(default_factory=list, max_length=4)

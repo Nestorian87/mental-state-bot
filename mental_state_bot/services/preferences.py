@@ -7,10 +7,7 @@ from mental_state_bot.db.models import UserSettings
 
 SNAPSHOTS_PAUSED_KEY = "snapshots_paused"
 QUIET_UNTIL_KEY = "quiet_until"
-CONTEXT_QUIET_ENABLED_KEY = "context_quiet_enabled"
 ADAPTIVE_OBSERVATION_ENABLED_KEY = "adaptive_observation_enabled"
-CONTEXT_QUIET_LAST_OFFER_AT_KEY = "context_quiet_last_offer_at"
-CONTEXT_QUIET_LAST_CHECK_AT_KEY = "context_quiet_last_check_at"
 CUSTOM_INTERACTION_STYLE_KEY = "custom_interaction_style"
 USER_PROFILE_CONTEXT_KEY = "user_profile_context"
 PENDING_INPUT_KEY = "pending_input"
@@ -84,10 +81,6 @@ def settings_json_with_quiet_until(settings: UserSettings, until: datetime | Non
     return current
 
 
-def context_quiet_enabled(settings: UserSettings) -> bool:
-    return bool((getattr(settings, "settings_json", None) or {}).get(CONTEXT_QUIET_ENABLED_KEY, True))
-
-
 def adaptive_observation_enabled(settings: UserSettings) -> bool:
     return bool((getattr(settings, "settings_json", None) or {}).get(ADAPTIVE_OBSERVATION_ENABLED_KEY, True))
 
@@ -95,32 +88,6 @@ def adaptive_observation_enabled(settings: UserSettings) -> bool:
 def settings_json_with_adaptive_observation(settings: UserSettings, enabled: bool) -> dict[str, Any]:
     current = dict(getattr(settings, "settings_json", None) or {})
     current[ADAPTIVE_OBSERVATION_ENABLED_KEY] = enabled
-    return current
-
-
-def settings_json_with_context_quiet(settings: UserSettings, enabled: bool) -> dict[str, Any]:
-    current = dict(getattr(settings, "settings_json", None) or {})
-    current[CONTEXT_QUIET_ENABLED_KEY] = enabled
-    return current
-
-
-def context_quiet_last_offer_at(settings: UserSettings) -> datetime | None:
-    return _datetime_from_settings(settings, CONTEXT_QUIET_LAST_OFFER_AT_KEY)
-
-
-def settings_json_with_context_quiet_last_offer(settings: UserSettings, offered_at: datetime) -> dict[str, Any]:
-    current = dict(getattr(settings, "settings_json", None) or {})
-    current[CONTEXT_QUIET_LAST_OFFER_AT_KEY] = offered_at.astimezone(UTC).isoformat()
-    return current
-
-
-def context_quiet_last_check_at(settings: UserSettings) -> datetime | None:
-    return _datetime_from_settings(settings, CONTEXT_QUIET_LAST_CHECK_AT_KEY)
-
-
-def settings_json_with_context_quiet_last_check(settings: UserSettings, checked_at: datetime) -> dict[str, Any]:
-    current = dict(getattr(settings, "settings_json", None) or {})
-    current[CONTEXT_QUIET_LAST_CHECK_AT_KEY] = checked_at.astimezone(UTC).isoformat()
     return current
 
 

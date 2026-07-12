@@ -29,7 +29,6 @@ from mental_state_bot.ai.prompts import (
     MICRO_SUMMARY_PROMPT,
     MONTHLY_SUMMARY_PROMPT,
     QUESTION_PROMPT,
-    QUIET_SUGGESTION_PROMPT,
     SEMANTIC_MEMORY_PROMPT,
     SYSTEM_STYLE,
     WEEKLY_SUMMARY_PROMPT,
@@ -52,7 +51,6 @@ from mental_state_bot.ai.schemas import (
     ModelCallResult,
     PeriodSummary,
     QuestionResult,
-    QuietSuggestion,
     Route,
     SemanticMemoryText,
 )
@@ -109,31 +107,6 @@ class AIService:
             schema_model=QuestionResult,
             system=SYSTEM_STYLE,
             prompt=QUESTION_PROMPT,
-            payload=context,
-            fallback=fallback,
-        )
-
-    async def suggest_quiet_pause(
-        self,
-        session: AsyncSession,
-        *,
-        user_id: UUID,
-        context: dict[str, Any],
-    ) -> tuple[QuietSuggestion, UUID | None]:
-        route = Route(
-            model=self.settings.ai_live_model,
-            thinking=False,
-            temperature=0.1,
-        )
-        fallback = QuietSuggestion(should_offer=False, confidence=0.0)
-        return await self._json_task(
-            session,
-            user_id=user_id,
-            task_name="suggest_quiet_pause",
-            route=route,
-            schema_model=QuietSuggestion,
-            system=SYSTEM_STYLE,
-            prompt=QUIET_SUGGESTION_PROMPT,
             payload=context,
             fallback=fallback,
         )
@@ -662,6 +635,7 @@ class AIService:
         request_hash = self.chat_client.request_hash(
             {"task": task_name, "model": route.model, "messages": messages}
         )
+        result: ModelCallResult | None = None
         try:
             result = await self.chat_client.chat(
                 task_name=task_name,
@@ -686,13 +660,24 @@ class AIService:
             run = await repo.create_model_run(
                 session,
                 user_id=user_id,
-                provider=self.settings.ai_provider,
-                model=route.model,
+                provider=result.provider if result is not None else self.settings.ai_provider,
+                model=result.model if result is not None else route.model,
                 task_name=task_name,
                 status="fallback_after_error",
+                prompt_tokens=result.usage.prompt_tokens if result is not None else None,
+                completion_tokens=result.usage.completion_tokens if result is not None else None,
+                reasoning_tokens=result.usage.reasoning_tokens if result is not None else None,
+                total_tokens=result.usage.total_tokens if result is not None else None,
+                estimated_cost_usd=(
+                    estimate_cost_usd(result.provider, result.model, result.usage) if result is not None else None
+                ),
+                latency_ms=result.latency_ms if result is not None else None,
                 error_message=str(exc),
                 request_hash=request_hash,
-                meta={"fallback": True},
+                meta={
+                    "fallback": True,
+                    "raw_usage": result.usage.model_dump() if result is not None else None,
+                },
             )
             return fallback, run.id
 

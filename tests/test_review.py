@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
 from uuid import uuid4
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image
 
+import mental_state_bot.services.review as review_module
 from mental_state_bot.emotions import EMOTION_COLORS
 from mental_state_bot.services.review import (
     AffectSpectrumPoint,
@@ -37,6 +39,7 @@ from mental_state_bot.services.review import (
     _sparkline,
     _story_material_lines,
     _truncate,
+    format_cost_report,
     format_day_turning_point,
     format_day_turning_points,
     format_gap_report,
@@ -44,6 +47,34 @@ from mental_state_bot.services.review import (
     format_similar_entries,
     format_summary_section,
 )
+
+
+async def test_cost_report_discloses_calls_without_a_known_price(monkeypatch) -> None:
+    async def model_run_cost_totals(session, *, user_id, since):
+        return {
+            "runs": 3,
+            "estimated_cost_usd": Decimal("0.012345"),
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "reasoning_tokens": 25,
+            "total_tokens": 150,
+            "estimated_runs": 2,
+        }
+
+    async def list_model_runs_since(session, *, user_id, since):
+        return [
+            SimpleNamespace(task_name="extract_entry_features", estimated_cost_usd=Decimal("0.012345"), total_tokens=150),
+            SimpleNamespace(task_name="unknown", estimated_cost_usd=None, total_tokens=0),
+            SimpleNamespace(task_name="unknown", estimated_cost_usd=None, total_tokens=0),
+        ]
+
+    monkeypatch.setattr(review_module.repo, "model_run_cost_totals", model_run_cost_totals)
+    monkeypatch.setattr(review_module.repo, "list_model_runs_since", list_model_runs_since)
+
+    text = await format_cost_report(object(), user=SimpleNamespace(id=uuid4()), days=7)
+
+    assert "Оцінка вартості: $0.012345 (для 2/3 викликів)" in text
+    assert "Без цінової оцінки: 1 з 3 викликів" in text
 
 
 def test_truncate_compacts_and_limits_text() -> None:

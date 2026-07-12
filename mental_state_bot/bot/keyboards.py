@@ -13,7 +13,6 @@ from mental_state_bot.db.models import UserSettings
 from mental_state_bot.emotions import CANONICAL_EMOTIONS
 from mental_state_bot.services.preferences import (
     adaptive_observation_enabled,
-    context_quiet_enabled,
     quiet_is_active,
     snapshots_paused,
 )
@@ -499,6 +498,7 @@ def data_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Візуальний PDF-звіт", callback_data="menu:data:visual_report")],
+            [InlineKeyboardButton(text="Витрати AI", callback_data="ai:costs")],
             [InlineKeyboardButton(text="Експорт", callback_data="menu:data:export")],
             [InlineKeyboardButton(text="Діагностика", callback_data="menu:data:diagnostics")],
             [InlineKeyboardButton(text="Переаналіз AI", callback_data="menu:data:reanalyze")],
@@ -528,7 +528,6 @@ def data_diagnostics_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Аудит архіву", callback_data="archive:audit")],
             [InlineKeyboardButton(text="Аудит емоцій", callback_data="menu:data:affect_audit")],
-            [InlineKeyboardButton(text="Витрати AI", callback_data="ai:costs")],
             [InlineKeyboardButton(text="Назад до даних", callback_data="menu:data")],
         ]
     )
@@ -766,7 +765,6 @@ def period_detail_keyboard(*, summary_id: str) -> InlineKeyboardMarkup:
 def settings_keyboard(*, user_settings: UserSettings) -> InlineKeyboardMarkup:
     settings_json = user_settings.settings_json or {}
     paused = snapshots_paused(user_settings)
-    quiet_text = "✅ Контекстна тиша" if context_quiet_enabled(user_settings) else "Контекстна тиша"
     quiet_status = "Тиша активна" if quiet_is_active(user_settings) else "Тиха пауза"
     active_text = "✅ На паузі" if paused else "✅ Увімкнено"
     body_text = "✅ Тіло" if user_settings.ask_body_signals else "Тіло"
@@ -783,10 +781,7 @@ def settings_keyboard(*, user_settings: UserSettings) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Збір даних", callback_data="settings:section:capture"),
                 InlineKeyboardButton(text=active_text, callback_data="settings:toggle:pause"),
             ],
-            [
-                InlineKeyboardButton(text=quiet_status, callback_data="quiet:menu"),
-                InlineKeyboardButton(text=quiet_text, callback_data="settings:toggle:context_quiet"),
-            ],
+            [InlineKeyboardButton(text=quiet_status, callback_data="quiet:menu")],
             [
                 InlineKeyboardButton(text=custom_style_text, callback_data="settings:custom_style"),
                 InlineKeyboardButton(text=context_text, callback_data="settings:profile_context"),
@@ -816,21 +811,6 @@ def quiet_menu_keyboard(*, active: bool = False) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="Скасувати паузу", callback_data="quiet:cancel")])
     rows.append([InlineKeyboardButton(text="Головне меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def quiet_offer_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="1 год", callback_data="quiet:set:1h"),
-                InlineKeyboardButton(text="2 год", callback_data="quiet:set:2h"),
-            ],
-            [
-                InlineKeyboardButton(text="Вказати час", callback_data="quiet:custom"),
-                InlineKeyboardButton(text="Не треба", callback_data="quiet:offer:no"),
-            ],
-        ]
-    )
 
 
 def settings_rhythm_keyboard(*, user_settings: UserSettings) -> InlineKeyboardMarkup:

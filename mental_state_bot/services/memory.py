@@ -92,6 +92,7 @@ class MemoryService:
                 completion_tokens=result.usage.completion_tokens,
                 reasoning_tokens=result.usage.reasoning_tokens,
                 total_tokens=result.usage.total_tokens,
+                estimated_cost_usd=estimate_embedding_cost_usd(result.model, result.usage),
                 latency_ms=result.latency_ms,
                 error_message=(
                     f"Embedding dimensions mismatch: expected "

@@ -35,7 +35,9 @@ def estimate_cost_usd(provider: str, model: str, usage: Usage) -> Decimal | None
 
     input_rate, output_rate = rates
     input_tokens = usage.prompt_tokens or 0
-    output_tokens = (usage.completion_tokens or 0) + (usage.reasoning_tokens or 0)
+    # OpenAI-compatible APIs report reasoning tokens as a breakdown of
+    # completion tokens, not an additional billed output stream.
+    output_tokens = usage.completion_tokens or 0
     return (Decimal(input_tokens) * input_rate + Decimal(output_tokens) * output_rate) / Decimal(1_000_000)
 
 

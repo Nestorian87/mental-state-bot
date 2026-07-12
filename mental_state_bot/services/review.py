@@ -1057,12 +1057,18 @@ async def format_cost_report(session: AsyncSession, *, user: User, days: int = 7
     lines = [
         f"Витрати за {days} днів:",
         f"Викликів моделі: {totals['runs']}",
-        f"Оцінка вартості: ${Decimal(totals['estimated_cost_usd']):.6f}",
+        f"Оцінка вартості: ${Decimal(totals['estimated_cost_usd']):.6f} (для {totals['estimated_runs']}/{totals['runs']} викликів)",
         (
             f"Токени: {totals['total_tokens']} загалом, {totals['prompt_tokens']} вхідні, "
             f"{totals['completion_tokens']} вихідні, {totals['reasoning_tokens']} міркування"
         ),
     ]
+    missing_estimates = totals["runs"] - totals["estimated_runs"]
+    if missing_estimates:
+        lines.append(
+            f"Без цінової оцінки: {missing_estimates} з {totals['runs']} викликів "
+            "(зазвичай пропущені або з невідомим тарифом моделі)."
+        )
     if by_task:
         lines.append("")
         lines.append("По задачах:")
