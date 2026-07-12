@@ -23,6 +23,7 @@ from mental_state_bot.ai.prompts import (
     LIFE_CONTEXT_PROMPT,
     LIFE_CONTEXT_PRUNE_PROMPT,
     LIFE_CONTEXT_REWRITE_PROMPT,
+    MEMORY_GRAPH_CONFIRMATION_ANSWER_PROMPT,
     MEMORY_GRAPH_PROMPT,
     MEMORY_GRAPH_REVIEW_PROMPT,
     MICRO_SUMMARY_PROMPT,
@@ -43,6 +44,7 @@ from mental_state_bot.ai.schemas import (
     LifeContextExtraction,
     LifeContextPruneResult,
     LifeContextRewriteResult,
+    MemoryGraphConfirmationAnswer,
     MemoryGraphDailyReview,
     MemoryGraphExtraction,
     MemoryGraphReviewResult,
@@ -346,6 +348,29 @@ class AIService:
             prompt=DAILY_MEMORY_GRAPH_REVIEW_PROMPT,
             payload=context,
             fallback=MemoryGraphDailyReview(notes=["fallback"]),
+        )
+
+    async def interpret_memory_graph_confirmation(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        context: dict[str, Any],
+    ) -> tuple[MemoryGraphConfirmationAnswer, UUID | None]:
+        return await self._json_task(
+            session,
+            user_id=user_id,
+            task_name="interpret_memory_graph_confirmation",
+            route=Route(
+                model=self.settings.ai_live_model,
+                thinking=self.settings.ai_live_thinking,
+                temperature=0.05,
+            ),
+            schema_model=MemoryGraphConfirmationAnswer,
+            system=SYSTEM_STYLE,
+            prompt=MEMORY_GRAPH_CONFIRMATION_ANSWER_PROMPT,
+            payload=context,
+            fallback=MemoryGraphConfirmationAnswer(outcome="defer", reason="fallback"),
         )
 
     async def extract_life_context_candidates(

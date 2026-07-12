@@ -433,6 +433,7 @@ def memory_menu_keyboard(*, embeddings_enabled: bool) -> InlineKeyboardMarkup:
 
 def memory_technical_keyboard(*, embeddings_enabled: bool) -> InlineKeyboardMarkup:
     rows = [
+        [InlineKeyboardButton(text="Уточнення пам’яті", callback_data="menu:memory:confirmations")],
         [InlineKeyboardButton(text="Вплив пам’яті на питання", callback_data="menu:memory:influences")],
         [InlineKeyboardButton(text="Обслуговування графа", callback_data="menu:memory:maintain")],
         [InlineKeyboardButton(text="AI-ревізія графа", callback_data="menu:memory:review")],
@@ -440,6 +441,21 @@ def memory_technical_keyboard(*, embeddings_enabled: bool) -> InlineKeyboardMark
     if embeddings_enabled:
         rows.append([InlineKeyboardButton(text="Перебудувати пам’ять", callback_data="menu:memory:rebuild")])
     rows.append([InlineKeyboardButton(text="Назад до пам’яті", callback_data="menu:memory")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def memory_graph_confirmation_keyboard(*, item_id: str, options: Sequence[dict[str, str]]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=str(option["label"])[:80], callback_data=f"memory:confirm:{item_id}:{index}")]
+        for index, option in enumerate(options)
+        if str(option.get("label") or "").strip()
+    ]
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="Відповісти словами", callback_data=f"memory:confirm:{item_id}:text")],
+            [InlineKeyboardButton(text="Пізніше", callback_data=f"memory:confirm:{item_id}:defer")],
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

@@ -24,6 +24,7 @@ from mental_state_bot.services.preferences import (
     custom_interaction_style,
     life_context_items,
     pending_clarification,
+    pending_memory_graph_confirmation,
     post_entry_followup_is_active,
     quiet_is_active,
     snapshots_paused,
@@ -58,7 +59,11 @@ async def maybe_send_scheduled_snapshot(
 ) -> bool:
     user_settings = await repo.get_user_settings(session, user.id)
     now = utc_now()
-    if pending_clarification(user_settings) is not None or post_entry_followup_is_active(user_settings):
+    if (
+        pending_clarification(user_settings) is not None
+        or pending_memory_graph_confirmation(user_settings) is not None
+        or post_entry_followup_is_active(user_settings)
+    ):
         return False
     if not _is_active_time(now, user.timezone, user_settings):
         return False

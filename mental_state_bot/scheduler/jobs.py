@@ -1,23 +1,39 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from mental_state_bot.ai.service import AIService
-from mental_state_bot.bot.keyboards import period_detail_keyboard, summary_detail_keyboard
+from mental_state_bot.bot.keyboards import (
+    memory_graph_confirmation_keyboard,
+    period_detail_keyboard,
+    summary_detail_keyboard,
+)
 from mental_state_bot.config import Settings
 from mental_state_bot.db import repositories as repo
 from mental_state_bot.services.memory_graph import (
+    MemoryGraphConfirmationCandidate,
     maintain_memory_graph,
     review_memory_graph_duplicates,
 )
 from mental_state_bot.services.preferences import (
+    memory_graph_confirmation_last_offer_at,
+    memory_graph_confirmation_queue,
     memory_graph_last_consolidated_week,
+    pending_clarification,
     pending_input,
+    pending_memory_graph_confirmation,
+    post_entry_followup_is_active,
+    quiet_is_active,
+    settings_json_with_memory_graph_confirmation_last_offer,
+    settings_json_with_memory_graph_confirmation_queue,
     settings_json_with_memory_graph_consolidated_week,
+    settings_json_with_pending_memory_graph_confirmation,
     settings_json_without_pending_input,
 )
 from mental_state_bot.services.snapshots import maybe_send_scheduled_snapshot
@@ -139,6 +155,12 @@ async def morning_summary_tick(
                     user_id=user.id,
                     values={"settings_json": settings_json_without_pending_input(user_settings)},
                 )
+                continue
+            if summary is None:
+                try:
+                    await _maybe_offer_memory_graph_confirmation(session, bot=bot, user=user)
+                except Exception:
+                    logger.exception("Failed to offer memory graph confirmation", extra={"user_id": str(user.id)})
 
 
 async def period_summary_tick(
@@ -219,10 +241,16 @@ async def _run_weekly_memory_graph_consolidation(
         use_embedding_candidates=True,
         use_heavy_reasoning=True,
     )
+    settings_json = _settings_with_queued_memory_graph_confirmations(settings, review.confirmation_candidates)
     await repo.update_user_settings(
         session,
         user_id=user.id,
-        values={"settings_json": settings_json_with_memory_graph_consolidated_week(settings, week_key)},
+        values={
+            "settings_json": settings_json_with_memory_graph_consolidated_week(
+                _settings_view(settings_json),
+                week_key,
+            )
+        },
     )
     logger.info(
         "Weekly memory graph consolidation completed",
@@ -235,3 +263,73 @@ async def _run_weekly_memory_graph_consolidation(
             "decisions": review.decisions_received,
         },
     )
+
+
+def _settings_with_queued_memory_graph_confirmations(
+    settings,
+    candidates: tuple[MemoryGraphConfirmationCandidate, ...],
+) -> dict:
+    queue = memory_graph_confirmation_queue(settings)
+    active_pairs = {
+        tuple(sorted([str(item.get("left_node_id") or ""), str(item.get("right_node_id") or "")]))
+        for item in queue
+        if item.get("status") in {"queued", "active"}
+    }
+    now = datetime.now(UTC).isoformat()
+    for candidate in candidates:
+        pair = tuple(sorted([str(candidate.left_node_id), str(candidate.right_node_id)]))
+        if pair in active_pairs:
+            continue
+        queue.append(
+            {
+                "id": str(uuid.uuid4()),
+                "left_node_id": str(candidate.left_node_id),
+                "right_node_id": str(candidate.right_node_id),
+                "question": candidate.question,
+                "options": list(candidate.options),
+                "reason": candidate.reason,
+                "status": "queued",
+                "created_at": now,
+            }
+        )
+        active_pairs.add(pair)
+    return settings_json_with_memory_graph_confirmation_queue(settings, queue)
+
+
+async def _maybe_offer_memory_graph_confirmation(session: AsyncSession, *, bot: Bot, user) -> bool:
+    settings = await repo.get_user_settings(session, user.id)
+    if (
+        pending_input(settings) is not None
+        or pending_clarification(settings) is not None
+        or pending_memory_graph_confirmation(settings) is not None
+        or post_entry_followup_is_active(settings)
+        or quiet_is_active(settings)
+        or await repo.get_open_snapshot(session, user_id=user.id) is not None
+    ):
+        return False
+    last_offer = memory_graph_confirmation_last_offer_at(settings)
+    if last_offer is not None and datetime.now(UTC) - last_offer < timedelta(days=3):
+        return False
+    queue = memory_graph_confirmation_queue(settings)
+    item = next((candidate for candidate in queue if candidate.get("status") == "queued"), None)
+    if item is None:
+        return False
+    item = {**item, "status": "active", "offered_at": datetime.now(UTC).isoformat(), "delivery_source": "automatic"}
+    updated_queue = [item if candidate.get("id") == item.get("id") else candidate for candidate in queue]
+    settings_json = settings_json_with_memory_graph_confirmation_queue(settings, updated_queue)
+    settings_json = settings_json_with_pending_memory_graph_confirmation(_settings_view(settings_json), item)
+    settings_json = settings_json_with_memory_graph_confirmation_last_offer(
+        _settings_view(settings_json),
+        datetime.now(UTC),
+    )
+    await repo.update_user_settings(session, user_id=user.id, values={"settings_json": settings_json})
+    await bot.send_message(
+        chat_id=user.chat_id,
+        text=item["question"],
+        reply_markup=memory_graph_confirmation_keyboard(item_id=str(item["id"]), options=item.get("options") or []),
+    )
+    return True
+
+
+def _settings_view(settings_json: dict):
+    return type("SettingsView", (), {"settings_json": settings_json})()

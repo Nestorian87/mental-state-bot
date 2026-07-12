@@ -15,6 +15,7 @@ from mental_state_bot.ai.schemas import (
 )
 from mental_state_bot.services.memory_graph import (
     apply_daily_memory_graph_candidates,
+    apply_memory_graph_confirmation,
     apply_memory_graph_extraction,
     decay_memory_graph,
     format_personal_lexicon_view,
@@ -260,6 +261,83 @@ async def test_review_memory_graph_duplicates_applies_high_confidence_alias(monk
     assert "Мій проєкт" in album.aliases
     assert my_album.status == "stale"
     assert my_album.meta["duplicate_of"] == str(album_id)
+
+
+async def test_review_memory_graph_duplicates_exposes_user_confirmation_candidate(monkeypatch) -> None:
+    left_id = uuid4()
+    right_id = uuid4()
+    left = SimpleNamespace(
+        id=left_id, label="Робоча назва", aliases=[], kind="project", weight=0.7, confidence=0.7,
+        status="hypothesis", summary="Опис", last_seen_at=datetime(2026, 7, 10, tzinfo=UTC),
+        meta={"possible_duplicates": [{"node_id": str(right_id), "label": "Інша назва", "score": 0.91}]},
+    )
+    right = SimpleNamespace(
+        id=right_id, label="Інша назва", aliases=[], kind="project", weight=0.6, confidence=0.6,
+        status="hypothesis", summary="Опис", last_seen_at=datetime(2026, 7, 9, tzinfo=UTC),
+        meta={"possible_duplicates": [{"node_id": str(left_id), "label": "Робоча назва", "score": 0.91}]},
+    )
+
+    async def list_nodes(session, *, user_id, limit):
+        return [left, right]
+
+    async def list_evidence(session, *, user_id, node_ids, limit=2400):
+        return []
+
+    class FakeAIService:
+        async def review_memory_graph_pairs(self, session, *, user_id, context):
+            return (
+                MemoryGraphReviewResult(
+                    decisions=[
+                        MemoryGraphReviewDecision(
+                            pair_id=context["pairs"][0]["pair_id"],
+                            decision="unsure",
+                            confidence=0.6,
+                            needs_user_confirmation=True,
+                            confirmation_question="Це одна річ чи різні?",
+                            confirmation_options=[
+                                {"label": "Одна", "outcome": "same"},
+                                {"label": "Різні", "outcome": "separate"},
+                            ],
+                        )
+                    ]
+                ),
+                uuid4(),
+            )
+
+    monkeypatch.setattr(graph_module.repo, "list_memory_nodes", list_nodes)
+    monkeypatch.setattr(graph_module.repo, "list_memory_evidence_for_nodes", list_evidence)
+
+    result = await review_memory_graph_duplicates(object(), user_id=uuid4(), ai_service=FakeAIService())
+
+    assert result.pairs_needing_confirmation == 1
+    assert len(result.confirmation_candidates) == 1
+    assert result.confirmation_candidates[0].left_node_id == left_id
+    assert result.confirmation_candidates[0].options[0]["outcome"] == "same"
+
+
+async def test_apply_memory_graph_confirmation_merges_only_after_explicit_same(monkeypatch) -> None:
+    left = SimpleNamespace(
+        id=uuid4(), label="Назва", aliases=[], kind="project", weight=0.8, confidence=0.8,
+        status="hypothesis", summary=None, last_seen_at=datetime(2026, 7, 10, tzinfo=UTC), meta={},
+    )
+    right = SimpleNamespace(
+        id=uuid4(), label="Варіант назви", aliases=[], kind="project", weight=0.5, confidence=0.5,
+        status="candidate", summary=None, last_seen_at=datetime(2026, 7, 9, tzinfo=UTC), meta={},
+    )
+
+    async def get_nodes(session, *, user_id, node_ids):
+        return [left, right]
+
+    monkeypatch.setattr(graph_module.repo, "get_memory_nodes_by_ids", get_nodes)
+
+    result = await apply_memory_graph_confirmation(
+        object(), user_id=uuid4(), left_node_id=left.id, right_node_id=right.id, outcome="same"
+    )
+
+    assert result == "same"
+    assert "Варіант назви" in left.aliases
+    assert right.status == "stale"
+    assert right.meta["stale_reason"] == "user_confirmed_duplicate"
 
 
 async def test_daily_model_candidates_only_mark_pairs_for_later_review(monkeypatch) -> None:

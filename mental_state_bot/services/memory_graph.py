@@ -53,7 +53,17 @@ class MemoryGraphAIReviewResult:
     nodes_staled_as_duplicate: int = 0
     pairs_marked_separate: int = 0
     pairs_needing_confirmation: int = 0
+    confirmation_candidates: tuple[MemoryGraphConfirmationCandidate, ...] = ()
     run_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True)
+class MemoryGraphConfirmationCandidate:
+    left_node_id: uuid.UUID
+    right_node_id: uuid.UUID
+    question: str
+    options: tuple[dict[str, str], ...]
+    reason: str | None = None
 
 
 async def sync_confirmed_life_context_item(
@@ -260,6 +270,7 @@ async def review_memory_graph_duplicates(
         review, run_id = await ai_service.review_memory_graph_pairs(session, user_id=user_id, context=context)
     decisions = {decision.pair_id: decision for decision in review.decisions}
     aliases_added = nodes_staled = separate = needs_confirmation = 0
+    confirmation_candidates: list[MemoryGraphConfirmationCandidate] = []
 
     nodes_by_id = {str(node.id): node for node in nodes}
     for pair_id, left, right, _candidate in pairs:
@@ -277,6 +288,9 @@ async def review_memory_graph_duplicates(
         nodes_staled += result["nodes_staled"]
         separate += result["pairs_marked_separate"]
         needs_confirmation += result["pairs_needing_confirmation"]
+        candidate = _confirmation_candidate_for_decision(left, right, decision, result=result)
+        if candidate is not None:
+            confirmation_candidates.append(candidate)
 
     return MemoryGraphAIReviewResult(
         pairs_selected=len(pairs),
@@ -286,8 +300,73 @@ async def review_memory_graph_duplicates(
         nodes_staled_as_duplicate=nodes_staled,
         pairs_marked_separate=separate,
         pairs_needing_confirmation=needs_confirmation,
+        confirmation_candidates=tuple(confirmation_candidates),
         run_id=run_id,
     )
+
+
+async def apply_memory_graph_confirmation(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    left_node_id: uuid.UUID,
+    right_node_id: uuid.UUID,
+    outcome: str,
+    reason: str | None = None,
+) -> str:
+    """Apply an explicit user boundary without altering source evidence."""
+    nodes = {
+        str(node.id): node
+        for node in await repo.get_memory_nodes_by_ids(
+            session,
+            user_id=user_id,
+            node_ids=[left_node_id, right_node_id],
+        )
+    }
+    left = nodes.get(str(left_node_id))
+    right = nodes.get(str(right_node_id))
+    if left is None or right is None or left.id == right.id:
+        return "unavailable"
+    reviewed_at = utc_now()
+    if outcome == "separate":
+        decision = MemoryGraphReviewDecision(
+            pair_id=f"{left.id}:{right.id}",
+            decision="separate",
+            confidence=1.0,
+            reason=reason or "user_confirmed_separate",
+        )
+        _mark_review_separate(left, other=right, decision=decision, reviewed_at=reviewed_at)
+        _mark_review_separate(right, other=left, decision=decision, reviewed_at=reviewed_at)
+        return "separate"
+    if outcome != "same":
+        return "defer"
+
+    canonical, duplicate = _duplicate_keeper(left, right)
+    aliases_before = set(canonical.aliases or [])
+    canonical.aliases = _merge_aliases(canonical.aliases or [], [duplicate.label, *(duplicate.aliases or [])])
+    canonical.meta = {
+        **(canonical.meta or {}),
+        "graph_user_confirmation": {
+            "outcome": "same",
+            "reviewed_with": str(duplicate.id),
+            "reviewed_at": reviewed_at.isoformat(),
+            "reason": reason or "user_confirmed_same",
+            "aliases_added": max(0, len(set(canonical.aliases or []) - aliases_before)),
+        },
+        "possible_duplicates": _remove_possible_duplicate((canonical.meta or {}).get("possible_duplicates"), str(duplicate.id)),
+    }
+    duplicate.status = "stale"
+    duplicate.weight = min(duplicate.weight or Decimal("0.250"), Decimal("0.250"))
+    duplicate.meta = {
+        **(duplicate.meta or {}),
+        "stale_reason": "user_confirmed_duplicate",
+        "duplicate_of": str(canonical.id),
+        "duplicate_of_label": canonical.label,
+        "duplicate_confirmed_at": reviewed_at.isoformat(),
+        "duplicate_confirmation_reason": reason or "user_confirmed_same",
+        "possible_duplicates": _remove_possible_duplicate((duplicate.meta or {}).get("possible_duplicates"), str(canonical.id)),
+    }
+    return "same"
 
 
 async def daily_memory_graph_review_context(
@@ -1429,6 +1508,32 @@ def _apply_memory_graph_review_decision(
         _mark_review_needs_confirmation(duplicate, other=canonical, decision=decision, reviewed_at=reviewed_at)
         result["pairs_needing_confirmation"] = 1
     return result
+
+
+def _confirmation_candidate_for_decision(
+    left: MemoryNode,
+    right: MemoryNode,
+    decision: MemoryGraphReviewDecision,
+    *,
+    result: dict[str, int],
+) -> MemoryGraphConfirmationCandidate | None:
+    if not result["pairs_needing_confirmation"]:
+        return None
+    question = _compact(decision.confirmation_question or "")
+    options = [
+        {"label": _compact(option.label)[:80], "outcome": option.outcome}
+        for option in decision.confirmation_options
+        if _compact(option.label)
+    ]
+    if not question or len(options) < 2:
+        return None
+    return MemoryGraphConfirmationCandidate(
+        left_node_id=left.id,
+        right_node_id=right.id,
+        question=question[:600],
+        options=tuple(options[:4]),
+        reason=_compact(decision.reason or "")[:240] or None,
+    )
 
 
 def _mark_review_separate(

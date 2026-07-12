@@ -48,6 +48,7 @@ from mental_state_bot.bot.keyboards import (
     main_menu_keyboard,
     main_reply_keyboard,
     manual_entry_confirmation_keyboard,
+    memory_graph_confirmation_keyboard,
     memory_menu_keyboard,
     memory_rebuild_confirmation_keyboard,
     memory_technical_keyboard,
@@ -368,6 +369,29 @@ def test_manual_entry_confirmation_keyboard_exposes_save_and_ignore() -> None:
 
     assert callbacks == {"manual:save", "manual:ignore"}
     assert {callback.split(":", maxsplit=1)[1] for callback in callbacks} == MANUAL_ENTRY_ACTIONS
+
+
+def test_memory_graph_confirmation_keyboard_has_generated_options_and_safe_exits() -> None:
+    keyboard = memory_graph_confirmation_keyboard(
+        item_id="candidate-1",
+        options=[
+            {"label": "Це одна річ", "outcome": "same"},
+            {"label": "Це різні речі", "outcome": "separate"},
+        ],
+    )
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert callbacks == {
+        "memory:confirm:candidate-1:0",
+        "memory:confirm:candidate-1:1",
+        "memory:confirm:candidate-1:text",
+        "memory:confirm:candidate-1:defer",
+    }
 
 
 def test_day_query_parses_explicit_dates() -> None:

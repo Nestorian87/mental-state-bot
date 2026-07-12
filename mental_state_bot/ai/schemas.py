@@ -241,6 +241,18 @@ class MemoryGraphReviewDecision(BaseModel):
     reason: str | None = None
     confidence: float = Field(default=0.0, ge=0, le=1)
     needs_user_confirmation: bool = False
+    confirmation_question: str | None = None
+    confirmation_options: list[MemoryGraphConfirmationOption] = Field(default_factory=list, max_length=4)
+
+
+class MemoryGraphConfirmationOption(BaseModel):
+    label: str
+    outcome: Literal["same", "separate", "defer"]
+
+
+class MemoryGraphConfirmationAnswer(BaseModel):
+    outcome: Literal["same", "separate", "defer"] = "defer"
+    reason: str | None = None
 
 
 class MemoryGraphReviewResult(BaseModel):

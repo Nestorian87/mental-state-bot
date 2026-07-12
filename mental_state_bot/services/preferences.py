@@ -30,6 +30,9 @@ PLANNED_EVENTS_KEY = "planned_events"
 PENDING_PLANNED_EVENT_KEY = "pending_planned_event"
 PENDING_MEMORY_GRAPH_IMPORT_KEY = "pending_memory_graph_import"
 MEMORY_GRAPH_LAST_CONSOLIDATED_WEEK_KEY = "memory_graph_last_consolidated_week"
+MEMORY_GRAPH_CONFIRMATION_QUEUE_KEY = "memory_graph_confirmation_queue"
+PENDING_MEMORY_GRAPH_CONFIRMATION_KEY = "pending_memory_graph_confirmation"
+MEMORY_GRAPH_CONFIRMATION_LAST_OFFER_AT_KEY = "memory_graph_confirmation_last_offer_at"
 WAKE_TIME_RECORDS_KEY = "wake_time_records"
 PENDING_INPUT_KINDS = {
     "custom_style",
@@ -46,6 +49,7 @@ PENDING_INPUT_KINDS = {
     "planned_event_clarify",
     "wake_time",
     "memory_graph_import",
+    "memory_graph_confirmation",
 }
 
 
@@ -384,6 +388,52 @@ def settings_json_with_memory_graph_consolidated_week(
     return {
         **(getattr(settings, "settings_json", None) or {}),
         MEMORY_GRAPH_LAST_CONSOLIDATED_WEEK_KEY: week_key,
+    }
+
+
+def memory_graph_confirmation_queue(settings: UserSettings) -> list[dict[str, Any]]:
+    raw = (getattr(settings, "settings_json", None) or {}).get(MEMORY_GRAPH_CONFIRMATION_QUEUE_KEY) or []
+    return [dict(item) for item in raw if isinstance(item, dict)]
+
+
+def settings_json_with_memory_graph_confirmation_queue(
+    settings: UserSettings,
+    queue: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        **(getattr(settings, "settings_json", None) or {}),
+        MEMORY_GRAPH_CONFIRMATION_QUEUE_KEY: queue[-30:],
+    }
+
+
+def pending_memory_graph_confirmation(settings: UserSettings) -> dict[str, Any] | None:
+    raw = (getattr(settings, "settings_json", None) or {}).get(PENDING_MEMORY_GRAPH_CONFIRMATION_KEY)
+    return dict(raw) if isinstance(raw, dict) else None
+
+
+def settings_json_with_pending_memory_graph_confirmation(
+    settings: UserSettings,
+    item: dict[str, Any] | None,
+) -> dict[str, Any]:
+    current = dict(getattr(settings, "settings_json", None) or {})
+    if item is None:
+        current.pop(PENDING_MEMORY_GRAPH_CONFIRMATION_KEY, None)
+    else:
+        current[PENDING_MEMORY_GRAPH_CONFIRMATION_KEY] = item
+    return current
+
+
+def memory_graph_confirmation_last_offer_at(settings: UserSettings) -> datetime | None:
+    return _datetime_from_settings(settings, MEMORY_GRAPH_CONFIRMATION_LAST_OFFER_AT_KEY)
+
+
+def settings_json_with_memory_graph_confirmation_last_offer(
+    settings: UserSettings,
+    offered_at: datetime,
+) -> dict[str, Any]:
+    return {
+        **(getattr(settings, "settings_json", None) or {}),
+        MEMORY_GRAPH_CONFIRMATION_LAST_OFFER_AT_KEY: offered_at.astimezone(UTC).isoformat(),
     }
 
 

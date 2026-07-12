@@ -46,6 +46,7 @@ from mental_state_bot.bot.keyboards import (
     main_reply_keyboard,
     manual_entry_confirmation_keyboard,
     memory_ai_review_confirmation_keyboard,
+    memory_graph_confirmation_keyboard,
     memory_graph_import_confirmation_keyboard,
     memory_maintenance_confirmation_keyboard,
     memory_menu_keyboard,
@@ -106,6 +107,7 @@ from mental_state_bot.services.memory import MemoryService, backfill_entry_embed
 from mental_state_bot.services.memory_graph import (
     MemoryGraphAIReviewResult,
     MemoryGraphMaintenanceResult,
+    apply_memory_graph_confirmation,
     format_personal_lexicon_view,
     maintain_memory_graph,
     review_memory_graph_duplicates,
@@ -129,11 +131,13 @@ from mental_state_bot.services.preferences import (
     context_quiet_last_check_at,
     custom_interaction_style,
     life_context_items,
+    memory_graph_confirmation_queue,
     pending_clarification,
     pending_correction_entry_id,
     pending_input,
     pending_life_context_review,
     pending_manual_entry,
+    pending_memory_graph_confirmation,
     pending_memory_graph_import,
     pending_planned_event,
     pending_post_entry_followup,
@@ -146,10 +150,13 @@ from mental_state_bot.services.preferences import (
     settings_json_with_context_quiet_last_check,
     settings_json_with_context_quiet_last_offer,
     settings_json_with_custom_interaction_style,
+    settings_json_with_memory_graph_confirmation_last_offer,
+    settings_json_with_memory_graph_confirmation_queue,
     settings_json_with_pending_clarification,
     settings_json_with_pending_input,
     settings_json_with_pending_life_context_review,
     settings_json_with_pending_manual_entry,
+    settings_json_with_pending_memory_graph_confirmation,
     settings_json_with_pending_memory_graph_import,
     settings_json_with_pending_planned_event,
     settings_json_with_pending_post_entry_followup,
@@ -1059,6 +1066,33 @@ async def menu_callback_handler(
             memory_technical_keyboard(embeddings_enabled=_embeddings_ready(settings)),
         )
         return
+    if action == "menu:memory:confirmations":
+        async with sessionmaker() as session, session.begin():
+            user = await _get_or_create_callback_user(session, callback, settings)
+            user_settings = await repo.get_user_settings(session, user.id)
+            item, user_settings = await _activate_next_memory_graph_confirmation(
+                session,
+                user=user,
+                user_settings=user_settings,
+                source="manual",
+            )
+        await callback.answer()
+        if item is None:
+            await _edit_or_answer_menu(
+                callback,
+                "У черзі пам’яті зараз немає питань, які потребують твоєї межі.",
+                memory_technical_keyboard(embeddings_enabled=_embeddings_ready(settings)),
+            )
+        else:
+            await _clear_inline_keyboard(callback)
+            await callback.message.answer(
+                item["question"],
+                reply_markup=memory_graph_confirmation_keyboard(
+                    item_id=str(item["id"]),
+                    options=item.get("options") or [],
+                ),
+            )
+        return
     if action == "menu:life_context":
         async with sessionmaker() as session, session.begin():
             user = await _get_or_create_callback_user(session, callback, settings)
@@ -1435,6 +1469,66 @@ async def review_memory_callback_handler(
         _format_memory_ai_review_result(review, maintenance=maintenance),
         memory_menu_keyboard(embeddings_enabled=_embeddings_ready(settings)),
     )
+
+
+@router.callback_query(F.data.startswith("memory:confirm:"))
+async def memory_graph_confirmation_callback_handler(
+    callback: CallbackQuery,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    if not await _allowed_callback(callback, settings):
+        return
+    parts = (callback.data or "").split(":", maxsplit=3)
+    if len(parts) != 4:
+        await callback.answer("Не впізнав дію", show_alert=True)
+        return
+    _, _, item_id, action = parts
+    async with sessionmaker() as session, session.begin():
+        user = await _get_or_create_callback_user(session, callback, settings)
+        user_settings = await repo.get_user_settings(session, user.id)
+        pending = pending_memory_graph_confirmation(user_settings)
+        if pending is None or str(pending.get("id")) != item_id:
+            await callback.answer("Це питання вже неактуальне", show_alert=True)
+            await _clear_inline_keyboard(callback)
+            return
+        if action == "text":
+            next_json = settings_json_with_pending_input(user_settings, "memory_graph_confirmation")
+            await repo.update_user_settings(session, user_id=user.id, values={"settings_json": next_json})
+            await callback.answer()
+            await _clear_inline_keyboard(callback)
+            await callback.message.answer("Напиши, як ти сам це розрізняєш.")
+            return
+        if action == "defer":
+            await _complete_memory_graph_confirmation(
+                session,
+                user=user,
+                user_settings=user_settings,
+                item=pending,
+                outcome="defer",
+                reason="user_deferred",
+            )
+            text = "Ок, лишаю це питання на потім."
+        else:
+            options = list(pending.get("options") or [])
+            try:
+                option = options[int(action)]
+                outcome = str(option.get("outcome") or "defer")
+            except (IndexError, TypeError, ValueError):
+                await callback.answer("Цей варіант уже неактуальний", show_alert=True)
+                return
+            result = await _complete_memory_graph_confirmation(
+                session,
+                user=user,
+                user_settings=user_settings,
+                item=pending,
+                outcome=outcome,
+                reason="user_selected_option",
+            )
+            text = _memory_graph_confirmation_result_text(result)
+    await callback.answer()
+    await _clear_inline_keyboard(callback)
+    await callback.message.answer(text)
 
 
 @router.callback_query(F.data.startswith("life_context:"))
@@ -2949,6 +3043,61 @@ async def entry_handler(
                     day_text,
                     reply_markup=day_detail_keyboard(day_id=day_id) if day_id else day_menu_keyboard(),
                 )
+            direct_response_sent = True
+        elif pending_kind == "memory_graph_confirmation" and not message.photo:
+            pending = pending_memory_graph_confirmation(user_settings)
+            if pending is None:
+                await repo.update_user_settings(
+                    session,
+                    user_id=user.id,
+                    values={"settings_json": settings_json_without_pending_input(user_settings)},
+                )
+                await message.answer("Це питання пам’яті вже неактуальне.")
+            else:
+                node_ids = [
+                    node_id
+                    for node_id in (
+                        _uuid_or_none(str(pending.get("left_node_id") or "")),
+                        _uuid_or_none(str(pending.get("right_node_id") or "")),
+                    )
+                    if node_id is not None
+                ]
+                nodes = list(await repo.get_memory_nodes_by_ids(session, user_id=user.id, node_ids=node_ids))
+                evidence = list(await repo.list_memory_evidence_for_nodes(session, user_id=user.id, node_ids=node_ids))
+                evidence_by_node: dict[str, list[str]] = {}
+                for item in evidence:
+                    if item.node_id is not None and len(evidence_by_node.setdefault(str(item.node_id), [])) < 3:
+                        evidence_by_node[str(item.node_id)].append(str(item.evidence_text)[:320])
+                async with _typing(message, bot):
+                    interpretation, _ = await interaction_service.ai.interpret_memory_graph_confirmation(
+                        session,
+                        user_id=user.id,
+                        context={
+                            "question": pending.get("question"),
+                            "options": pending.get("options") or [],
+                            "user_answer": text,
+                            "nodes": [
+                                {
+                                    "id": str(node.id),
+                                    "label": node.label,
+                                    "aliases": node.aliases,
+                                    "kind": node.kind,
+                                    "summary": node.summary,
+                                    "evidence": evidence_by_node.get(str(node.id), []),
+                                }
+                                for node in nodes
+                            ],
+                        },
+                    )
+                result = await _complete_memory_graph_confirmation(
+                    session,
+                    user=user,
+                    user_settings=user_settings,
+                    item=pending,
+                    outcome=interpretation.outcome,
+                    reason=interpretation.reason or "user_free_text",
+                )
+                await message.answer(_memory_graph_confirmation_result_text(result))
             direct_response_sent = True
         elif pending_kind == "visual_report_range" and not message.photo:
             await repo.update_user_settings(
@@ -5403,6 +5552,86 @@ def _settings_view(settings_json: dict):
     view = SettingsView()
     view.settings_json = settings_json
     return view
+
+
+async def _activate_next_memory_graph_confirmation(
+    session: AsyncSession,
+    *,
+    user: User,
+    user_settings: UserSettings,
+    source: str,
+) -> tuple[dict[str, Any] | None, UserSettings]:
+    pending = pending_memory_graph_confirmation(user_settings)
+    if pending is not None:
+        return pending, user_settings
+    queue = memory_graph_confirmation_queue(user_settings)
+    item = next((candidate for candidate in queue if candidate.get("status") == "queued"), None)
+    if item is None:
+        return None, user_settings
+    item = {**item, "status": "active", "offered_at": utc_now().isoformat(), "delivery_source": source}
+    next_queue = [item if candidate.get("id") == item.get("id") else candidate for candidate in queue]
+    settings_json = settings_json_with_memory_graph_confirmation_queue(user_settings, next_queue)
+    settings_json = settings_json_with_pending_memory_graph_confirmation(_settings_view(settings_json), item)
+    updated = await repo.update_user_settings(session, user_id=user.id, values={"settings_json": settings_json})
+    return item, updated
+
+
+async def _complete_memory_graph_confirmation(
+    session: AsyncSession,
+    *,
+    user: User,
+    user_settings: UserSettings,
+    item: dict[str, Any],
+    outcome: str,
+    reason: str | None,
+) -> str:
+    left_node_id = _uuid_or_none(str(item.get("left_node_id") or ""))
+    right_node_id = _uuid_or_none(str(item.get("right_node_id") or ""))
+    if left_node_id is None or right_node_id is None:
+        result = "unavailable"
+    else:
+        result = await apply_memory_graph_confirmation(
+            session,
+            user_id=user.id,
+            left_node_id=left_node_id,
+            right_node_id=right_node_id,
+            outcome=outcome,
+            reason=reason,
+        )
+    now = utc_now().isoformat()
+    # "Later" preserves the candidate for a future automatic offer.  The
+    # shared offer cooldown keeps it from returning immediately or competing
+    # with a different candidate.
+    status = "answered" if result in {"same", "separate"} else "queued"
+    queue = memory_graph_confirmation_queue(user_settings)
+    next_queue = [
+        {
+            **candidate,
+            "status": status,
+            **({"answered_at": now} if status == "answered" else {"deferred_at": now}),
+            "outcome": result,
+            "answer_source": "user",
+        }
+        if candidate.get("id") == item.get("id")
+        else candidate
+        for candidate in queue
+    ]
+    settings_json = settings_json_with_memory_graph_confirmation_queue(user_settings, next_queue)
+    settings_json = settings_json_with_pending_memory_graph_confirmation(_settings_view(settings_json), None)
+    settings_json = settings_json_with_pending_input(_settings_view(settings_json), None)
+    if result == "defer":
+        settings_json = settings_json_with_memory_graph_confirmation_last_offer(_settings_view(settings_json), utc_now())
+    await repo.update_user_settings(session, user_id=user.id, values={"settings_json": settings_json})
+    return result
+
+
+def _memory_graph_confirmation_result_text(result: str) -> str:
+    return {
+        "same": "Записав: це один контекст, лише з різними назвами.",
+        "separate": "Записав: це різні речі, не буду їх зливати.",
+        "defer": "Ок, лишаю цю межу невизначеною.",
+        "unavailable": "Ці вузли вже змінилися, тому нічого не оновлював.",
+    }.get(result, "Ок, лишаю це без змін.")
 
 
 def _help_text() -> str:
