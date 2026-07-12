@@ -41,7 +41,6 @@ PENDING_INPUT_KINDS = {
     "voice_transcript",
     "voice_transcript_fix",
     "day_date",
-    "memory_search",
     "visual_report_range",
     "reanalysis_range",
     "planned_event_clarify",

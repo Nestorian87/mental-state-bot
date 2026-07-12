@@ -365,15 +365,11 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="Пам’ять", callback_data="menu:memory"),
-                InlineKeyboardButton(text="Живий контекст", callback_data="menu:life_context"),
-            ],
-            [
                 InlineKeyboardButton(text="Дані", callback_data="menu:data"),
-                InlineKeyboardButton(text="Налаштування", callback_data="settings:open"),
             ],
             [
+                InlineKeyboardButton(text="Налаштування", callback_data="settings:open"),
                 InlineKeyboardButton(text="Новий зріз", callback_data="snapshot:new"),
-                InlineKeyboardButton(text="Уточнення", callback_data="menu:clarifications"),
             ],
         ]
     )
@@ -387,6 +383,7 @@ def day_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Вчора", callback_data="menu:day:yesterday"),
             ],
             [InlineKeyboardButton(text="Ввести дату", callback_data="menu:day:date")],
+            [InlineKeyboardButton(text="Уточнення", callback_data="menu:clarifications")],
             [InlineKeyboardButton(text="Головне меню", callback_data="menu:main")],
         ]
     )
@@ -419,25 +416,31 @@ def period_choice_keyboard(*, period: str) -> InlineKeyboardMarkup:
 
 
 def memory_menu_keyboard(*, embeddings_enabled: bool) -> InlineKeyboardMarkup:
-    status = "✅ embeddings увімкнені" if embeddings_enabled else "embeddings вимкнені"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Візуалізація графа", callback_data="menu:memory:graph")],
+            [InlineKeyboardButton(text="Живий контекст", callback_data="menu:life_context")],
             [InlineKeyboardButton(text="Фрази й значення", callback_data="menu:memory:lexicon")],
             [
                 InlineKeyboardButton(text="Експорт графа", callback_data="menu:memory:export"),
                 InlineKeyboardButton(text="Імпорт графа", callback_data="menu:memory:import"),
             ],
-            [InlineKeyboardButton(text="Пошук у пам’яті", callback_data="menu:memory:search")],
-            [InlineKeyboardButton(text="Схоже на останній запис", callback_data="menu:memory:last")],
-            [InlineKeyboardButton(text="Пам’ять у питаннях", callback_data="menu:memory:influences")],
-            [InlineKeyboardButton(text="Обслуговування графа", callback_data="menu:memory:maintain")],
-            [InlineKeyboardButton(text="AI-ревізія графа", callback_data="menu:memory:review")],
-            [InlineKeyboardButton(text="Перебудувати пам’ять", callback_data="menu:memory:rebuild")],
-            [InlineKeyboardButton(text=status, callback_data="menu:memory:status")],
+            [InlineKeyboardButton(text="Технічне", callback_data="menu:memory:technical")],
             [InlineKeyboardButton(text="Головне меню", callback_data="menu:main")],
         ]
     )
+
+
+def memory_technical_keyboard(*, embeddings_enabled: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Вплив пам’яті на питання", callback_data="menu:memory:influences")],
+        [InlineKeyboardButton(text="Обслуговування графа", callback_data="menu:memory:maintain")],
+        [InlineKeyboardButton(text="AI-ревізія графа", callback_data="menu:memory:review")],
+    ]
+    if embeddings_enabled:
+        rows.append([InlineKeyboardButton(text="Перебудувати пам’ять", callback_data="menu:memory:rebuild")])
+    rows.append([InlineKeyboardButton(text="Назад до пам’яті", callback_data="menu:memory")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def memory_maintenance_confirmation_keyboard() -> InlineKeyboardMarkup:
@@ -480,11 +483,17 @@ def data_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Візуальний PDF-звіт", callback_data="menu:data:visual_report")],
-            [
-                InlineKeyboardButton(text="Аудит архіву", callback_data="archive:audit"),
-                InlineKeyboardButton(text="Витрати AI", callback_data="ai:costs"),
-            ],
-            [InlineKeyboardButton(text="Аудит емоцій", callback_data="menu:data:affect_audit")],
+            [InlineKeyboardButton(text="Експорт", callback_data="menu:data:export")],
+            [InlineKeyboardButton(text="Діагностика", callback_data="menu:data:diagnostics")],
+            [InlineKeyboardButton(text="Переаналіз AI", callback_data="menu:data:reanalyze")],
+            [InlineKeyboardButton(text="Головне меню", callback_data="menu:main")],
+        ]
+    )
+
+
+def data_export_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
                 InlineKeyboardButton(text="JSON", callback_data="archive:export"),
                 InlineKeyboardButton(text="Markdown", callback_data="archive:export_md"),
@@ -493,8 +502,18 @@ def data_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="CSV", callback_data="archive:export_csv"),
                 InlineKeyboardButton(text="ZIP", callback_data="archive:export_zip"),
             ],
-            [InlineKeyboardButton(text="Переаналіз AI", callback_data="menu:data:reanalyze")],
-            [InlineKeyboardButton(text="Головне меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text="Назад до даних", callback_data="menu:data")],
+        ]
+    )
+
+
+def data_diagnostics_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Аудит архіву", callback_data="archive:audit")],
+            [InlineKeyboardButton(text="Аудит емоцій", callback_data="menu:data:affect_audit")],
+            [InlineKeyboardButton(text="Витрати AI", callback_data="ai:costs")],
+            [InlineKeyboardButton(text="Назад до даних", callback_data="menu:data")],
         ]
     )
 
@@ -610,7 +629,7 @@ def life_context_menu_keyboard(*, has_items: bool = False) -> InlineKeyboardMark
     if has_items:
         rows.append([InlineKeyboardButton(text="Показати живий контекст", callback_data="life_context:list")])
         rows.append([InlineKeyboardButton(text="Оновити живий контекст", callback_data="life_context:rewrite")])
-    rows.append([InlineKeyboardButton(text="Головне меню", callback_data="menu:main")])
+    rows.append([InlineKeyboardButton(text="Назад до пам’яті", callback_data="menu:memory")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

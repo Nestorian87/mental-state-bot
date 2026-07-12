@@ -124,7 +124,6 @@ to the VPS, and run the deploy script automatically. Runtime secrets stay in `.e
 - `/gaps` - show today's coverage, notable pauses, and missed prompts.
 - `/raw` - show today's raw entries.
 - `/report` - show timeline and metrics together.
-- `/similar <text>` - find semantically similar moments when embeddings are enabled.
 - `/costs` - show model usage and estimated cost for the last 7 days.
 - `/audit` - show archive coverage and maintenance suggestions.
 - `/settings` - show active hours, snapshot frequency, reminder delay, and command hints.

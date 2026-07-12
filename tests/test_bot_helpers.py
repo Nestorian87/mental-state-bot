@@ -10,7 +10,6 @@ from mental_state_bot.bot.handlers import (
     VOICE_TRANSCRIPTION_ACTIONS,
     VoiceNoteTranscription,
     _archive_export_options,
-    _command_argument,
     _format_semantic_memory_influences,
     _format_settings_text,
     _frequency_preset_values,
@@ -35,6 +34,8 @@ from mental_state_bot.bot.keyboards import (
     EMOTION_CALIBRATION_OPTIONS,
     clarifications_menu_keyboard,
     correction_keyboard,
+    data_diagnostics_keyboard,
+    data_export_keyboard,
     data_menu_keyboard,
     day_detail_keyboard,
     day_menu_keyboard,
@@ -49,6 +50,7 @@ from mental_state_bot.bot.keyboards import (
     manual_entry_confirmation_keyboard,
     memory_menu_keyboard,
     memory_rebuild_confirmation_keyboard,
+    memory_technical_keyboard,
     metric_score_keyboard,
     missed_prompt_keyboard,
     period_detail_keyboard,
@@ -93,11 +95,6 @@ from mental_state_bot.services.preferences import (
     settings_json_without_pending_voice_transcript,
     snapshots_paused,
 )
-
-
-def test_command_argument() -> None:
-    assert _command_argument("/similar лежу порожньо") == "лежу порожньо"
-    assert _command_argument("/similar") == ""
 
 
 def test_valid_hhmm() -> None:
@@ -546,12 +543,12 @@ def test_main_menu_groups_sections() -> None:
         "menu:day",
         "menu:summaries",
         "menu:memory",
-        "menu:life_context",
         "menu:data",
         "settings:open",
-        "menu:clarifications",
     } <= callbacks
-    assert len(keyboard.inline_keyboard) == 4
+    assert "menu:life_context" not in callbacks
+    assert "menu:clarifications" not in callbacks
+    assert len(keyboard.inline_keyboard) == 3
 
 
 def test_submenus_expose_grouped_actions() -> None:
@@ -567,19 +564,43 @@ def test_submenus_expose_grouped_actions() -> None:
         for button in row
         if button.callback_data
     }
+    technical_callbacks = {
+        button.callback_data
+        for row in memory_technical_keyboard(embeddings_enabled=True).inline_keyboard
+        for button in row
+        if button.callback_data
+    }
     data_callbacks = {
         button.callback_data
         for row in data_menu_keyboard().inline_keyboard
         for button in row
         if button.callback_data
     }
+    export_callbacks = {
+        button.callback_data
+        for row in data_export_keyboard().inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+    diagnostics_callbacks = {
+        button.callback_data
+        for row in data_diagnostics_keyboard().inline_keyboard
+        for button in row
+        if button.callback_data
+    }
 
     assert "menu:day:date" in day_callbacks
-    assert "menu:memory:search" in memory_callbacks
-    assert "menu:memory:maintain" in memory_callbacks
-    assert "menu:memory:review" in memory_callbacks
-    assert "menu:memory:rebuild" in memory_callbacks
-    assert "archive:export_zip" in data_callbacks
+    assert "menu:clarifications" in day_callbacks
+    assert "menu:life_context" in memory_callbacks
+    assert "menu:memory:technical" in memory_callbacks
+    assert "menu:memory:search" not in memory_callbacks
+    assert "menu:memory:maintain" in technical_callbacks
+    assert "menu:memory:review" in technical_callbacks
+    assert "menu:memory:rebuild" in technical_callbacks
+    assert "menu:data:export" in data_callbacks
+    assert "menu:data:diagnostics" in data_callbacks
+    assert "archive:export_zip" in export_callbacks
+    assert "archive:audit" in diagnostics_callbacks
     assert "menu:data:reanalyze" in data_callbacks
 
 
@@ -789,7 +810,7 @@ def test_pending_correction_target_clears_with_pending_input() -> None:
 
 
 def test_menu_pending_input_kinds_are_supported() -> None:
-    for kind in ("day_date", "memory_search", "visual_report_range"):
+    for kind in ("day_date", "visual_report_range"):
         settings = SimpleNamespace(settings_json={})
 
         settings.settings_json = settings_json_with_pending_input(settings, kind)

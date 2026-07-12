@@ -24,6 +24,8 @@ from mental_state_bot.bot.keyboards import (
     clarifications_menu_keyboard,
     clarifications_skip_all_confirmation_keyboard,
     correction_keyboard,
+    data_diagnostics_keyboard,
+    data_export_keyboard,
     data_menu_keyboard,
     day_detail_keyboard,
     day_menu_keyboard,
@@ -48,6 +50,7 @@ from mental_state_bot.bot.keyboards import (
     memory_maintenance_confirmation_keyboard,
     memory_menu_keyboard,
     memory_rebuild_confirmation_keyboard,
+    memory_technical_keyboard,
     metric_score_keyboard,
     period_choice_keyboard,
     period_detail_keyboard,
@@ -193,7 +196,6 @@ from mental_state_bot.services.review import (
     format_photo_moments_view,
     format_raw_entries_for_day,
     format_raw_entries_view,
-    format_similar_entries,
     format_summary_section,
     format_today_view,
     get_day_turning_points,
@@ -609,34 +611,6 @@ async def visual_report_command_handler(
     )
 
 
-@router.message(Command("similar"))
-async def similar_command_handler(
-    message: Message,
-    settings: Settings,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    memory_service: MemoryService,
-) -> None:
-    if not await _allowed(message, settings):
-        return
-    query = _command_argument(message.text or "")
-    if not query:
-        await message.answer("Формат: /similar лежу порожньо не можу почати")
-        return
-    if not settings.embeddings_enabled or not settings.embedding_api_key:
-        await message.answer("Semantic search ще не активний: треба EMBEDDING_API_KEY і EMBEDDINGS_ENABLED=true.")
-        return
-    async with sessionmaker() as session, session.begin():
-        user = await _get_or_create_message_user(session, message, settings)
-        async with _typing(message):
-            text = await _format_similar_memory_query(
-                session,
-                user=user,
-                memory_service=memory_service,
-                query=query,
-            )
-    await _answer_long_text(message, text)
-
-
 @router.message(Command("settings"))
 async def settings_handler(
     message: Message,
@@ -1044,7 +1018,6 @@ async def menu_callback_handler(
     settings: Settings,
     sessionmaker: async_sessionmaker[AsyncSession],
     summary_service: SummaryService,
-    memory_service: MemoryService,
     ai_service: AIService,
 ) -> None:
     if not await _allowed_callback(callback, settings):
@@ -1078,6 +1051,14 @@ async def menu_callback_handler(
             memory_menu_keyboard(embeddings_enabled=_embeddings_ready(settings)),
         )
         return
+    if action == "menu:memory:technical":
+        await callback.answer()
+        await _edit_or_answer_menu(
+            callback,
+            "Технічні інструменти пам’яті.",
+            memory_technical_keyboard(embeddings_enabled=_embeddings_ready(settings)),
+        )
+        return
     if action == "menu:life_context":
         async with sessionmaker() as session, session.begin():
             user = await _get_or_create_callback_user(session, callback, settings)
@@ -1093,6 +1074,14 @@ async def menu_callback_handler(
     if action == "menu:data":
         await callback.answer()
         await _edit_or_answer_menu(callback, "Дані й архів.", data_menu_keyboard())
+        return
+    if action == "menu:data:export":
+        await callback.answer()
+        await _edit_or_answer_menu(callback, "Експорт даних.", data_export_keyboard())
+        return
+    if action == "menu:data:diagnostics":
+        await callback.answer()
+        await _edit_or_answer_menu(callback, "Діагностика.", data_diagnostics_keyboard())
         return
     if action == "menu:clarifications":
         async with sessionmaker() as session, session.begin():
@@ -1205,22 +1194,6 @@ async def menu_callback_handler(
         await _mark_summary_delivered(sessionmaker, summary_id=summary.id)
         return
 
-    if action == "menu:memory:search":
-        async with sessionmaker() as session, session.begin():
-            user = await _get_or_create_callback_user(session, callback, settings)
-            user_settings = await repo.get_user_settings(session, user.id)
-            await repo.update_user_settings(
-                session,
-                user_id=user.id,
-                values={"settings_json": settings_json_with_pending_input(user_settings, "memory_search")},
-            )
-        await callback.answer()
-        await callback.message.answer(
-            "Що пошукати в пам’яті?",
-            reply_markup=main_reply_keyboard("Наприклад: гуляю, не можу почати, спокійний вечір"),
-        )
-        return
-
     if action == "menu:memory:graph":
         await callback.answer("Готую граф")
         async with sessionmaker() as session, session.begin():
@@ -1272,27 +1245,6 @@ async def menu_callback_handler(
             text,
             reply_markup=memory_menu_keyboard(embeddings_enabled=_embeddings_ready(settings)),
         )
-        return
-
-    if action == "menu:memory:last":
-        if not _embeddings_ready(settings):
-            await callback.answer("Embeddings не активні", show_alert=True)
-            return
-        async with sessionmaker() as session, session.begin():
-            user = await _get_or_create_callback_user(session, callback, settings)
-            recent = await repo.get_recent_entries(session, user_id=user.id, limit=1)
-            if not recent or not (recent[-1].raw_text or "").strip():
-                text = "Поки немає текстового останнього запису, від якого можна шукати схожі моменти."
-            else:
-                async with _typing(callback.message):
-                    text = await _format_similar_memory_query(
-                        session,
-                        user=user,
-                        memory_service=memory_service,
-                        query=recent[-1].raw_text or "",
-                    )
-        await callback.answer()
-        await _answer_long_text(callback.message, text, reply_markup=memory_menu_keyboard(embeddings_enabled=True))
         return
 
     if action == "menu:memory:influences":
@@ -2996,31 +2948,6 @@ async def entry_handler(
                     message,
                     day_text,
                     reply_markup=day_detail_keyboard(day_id=day_id) if day_id else day_menu_keyboard(),
-                )
-            direct_response_sent = True
-        elif pending_kind == "memory_search" and not message.photo:
-            await repo.update_user_settings(
-                session,
-                user_id=user.id,
-                values={"settings_json": settings_json_without_pending_input(user_settings)},
-            )
-            if not _embeddings_ready(settings):
-                await message.answer(
-                    "Пошук у пам’яті зараз не активний: потрібні EMBEDDINGS_ENABLED=true і EMBEDDING_API_KEY.",
-                    reply_markup=memory_menu_keyboard(embeddings_enabled=False),
-                )
-            else:
-                async with _typing(message, bot):
-                    memory_text = await _format_similar_memory_query(
-                        session,
-                        user=user,
-                        memory_service=memory_service,
-                        query=text,
-                    )
-                await _answer_long_text(
-                    message,
-                    memory_text,
-                    reply_markup=memory_menu_keyboard(embeddings_enabled=True),
                 )
             direct_response_sent = True
         elif pending_kind == "visual_report_range" and not message.photo:
@@ -5270,26 +5197,6 @@ async def _format_day_for_date(
     return text, str(day.id)
 
 
-async def _format_similar_memory_query(
-    session: AsyncSession,
-    *,
-    user: User,
-    memory_service: MemoryService,
-    query: str,
-) -> str:
-    records = list(await memory_service.similar_entries(session, user_id=user.id, query_text=query, limit=6))
-    entry_ids = [record.target_id for record in records if record.target_type == "entry"]
-    entries = list(await repo.list_entries_by_ids(session, entry_ids=entry_ids))
-    analyses = list(await repo.list_analyses_for_targets(session, target_type="entry", target_ids=entry_ids))
-    return format_similar_entries(
-        records,
-        query=query,
-        entries=entries,
-        analyses=analyses,
-        timezone=user.timezone,
-    )
-
-
 def _embeddings_ready(settings: Settings) -> bool:
     return bool(settings.embeddings_enabled and settings.embedding_api_key)
 
@@ -5516,7 +5423,6 @@ def _help_text() -> str:
             "/week prev - підсумок попереднього тижня",
             "/month - підсумок поточного місяця",
             "/month prev - підсумок попереднього місяця",
-            "/similar <текст> - знайти схожі моменти",
             "/costs - витрати й токени",
             "/audit - стан архіву й покриття даних",
             "/settings - налаштування",

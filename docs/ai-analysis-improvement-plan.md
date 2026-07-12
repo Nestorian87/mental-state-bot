@@ -460,7 +460,7 @@ Storage note:
 
 ## Priority 7: Semantic Situation Memory
 
-Use embeddings as a practical memory layer, not only as manual `/similar` search.
+Use embeddings as a practical memory layer for automatic retrieval, not as a manual list of similar records.
 
 Important correction:
 
